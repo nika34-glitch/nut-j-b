@@ -1,4 +1,4 @@
-# src/main.rs
+// src/main.rs
 //! Libero Email Validator – v5.2 (Hyper‑Optimised Edition)
 //! -------------------------------------------------------
 //! *This file is a superset of the original 5.1 translation.* **All names, lines
@@ -19,9 +19,8 @@ use clap::Parser;
 use jemallocator::Jemalloc;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
-use rustls::ClientConfig;
-use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
+use rand::rng;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -31,7 +30,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 
@@ -102,26 +102,9 @@ use io_backend::*;
 // ENH#13, #16 – Advanced socket tuning
 #[inline]
 fn set_socket_opts(sock: &Socket) {
-    // Safety: We control lifetime; options are idempotent.
-    sock.set_nodelay(true).ok(); // TCP_NODELAY
-    let linger = libc::linger { l_onoff: 1, l_linger: 0 };
-    unsafe {
-        // Setting SO_LINGER with zero timeout forces RST on close.
-        let _ = sock.setsockopt(libc::SOL_SOCKET, libc::SO_LINGER, &linger);
-    }
-    sock.set_reuse_address(true).ok(); // SO_REUSEADDR
-    // TCP_FASTOPEN where available.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    unsafe {
-        let qlen: libc::c_int = 5;
-        let _ = sock.setsockopt(libc::IPPROTO_TCP, libc::TCP_FASTOPEN, &qlen);
-    }
-    // ENH#17 Busy‑poll.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let val: libc::c_int = 1;
-        let _ = sock.setsockopt(libc::SOL_SOCKET, libc::SO_BUSY_POLL, &val);
-    }
+    sock.set_nodelay(true).ok();
+    sock.set_reuse_address(true).ok();
+    sock.set_linger(Some(Duration::from_secs(0))).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +192,8 @@ mod ebpf_filter {
 // Original tune_socket replaced with new set_socket_opts but kept for ABI.
 #[inline]
 fn _tune_socket(sock: &std::net::TcpStream) {
-    if let Ok(raw) = Socket::from(sock) {
+    if let Ok(cloned) = sock.try_clone() {
+        let raw = Socket::from(cloned);
         set_socket_opts(&raw);
     }
 }
@@ -225,7 +209,7 @@ struct ProxyPool {
 
 impl ProxyPool {
     fn new(mut proxies: Vec<String>) -> Self {
-        proxies.shuffle(&mut thread_rng());
+        proxies.shuffle(&mut rng());
         let pool = Self {
             cycle: Arc::new(Mutex::new(proxies)),
             idx: Arc::new(AtomicUsize::new(0)),
@@ -392,8 +376,28 @@ static MAIL_HOSTS: phf::Map<&'static str, (&'static str, &'static str)> = phf::p
     "blu.it"    => ("popmail.libero.it", "imapmail.libero.it"),
 };
 
-fn resolve_hosts(domain: &str) -> (&'static str, &'static str) {
+fn resolve_hosts<'a>(domain: &'a str) -> (&'a str, &'a str) {
     MAIL_HOSTS.get(domain).copied().unwrap_or((domain, domain))
+}
+
+// Basic unit tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_known_domain() {
+        let (p, i) = resolve_hosts("libero.it");
+        assert_eq!(p, "popmail.libero.it");
+        assert_eq!(i, "imapmail.libero.it");
+    }
+
+    #[test]
+    fn resolve_unknown_domain() {
+        let (p, i) = resolve_hosts("example.com");
+        assert_eq!(p, "example.com");
+        assert_eq!(i, "example.com");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -435,8 +439,9 @@ impl Stats {
 
 // ---------------------------------------------------------------------------
 // Consumer factory remains, queue capacity bumped (ENH#10)
+
 fn create_consumer(
-    mut rx: Receiver<(String, String)>,
+    rx: Arc<AsyncMutex<Receiver<(String, String)>>>,
     stats: Arc<Stats>,
     cfg: Arc<Config>,
     proxies: ProxyPool,
@@ -445,7 +450,9 @@ fn create_consumer(
     mut error_f: File,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some((email, pwd)) = rx.recv().await {
+        loop {
+            let opt = { rx.lock().await.recv().await };
+            let Some((email, pwd)) = opt else { break };
             let domain = email.split('@').nth(1).unwrap_or("");
             let mut ok = false;
             let mut net_err = true;
@@ -631,6 +638,7 @@ async fn run_validator(cfg: Arc<Config>) {
 
     // ENH#10 4× concurrency channel depth
     let (tx, rx) = mpsc::channel::<(String, String)>(cfg.concurrency * 4);
+    let rx = Arc::new(AsyncMutex::new(rx));
 
     // Spawn consumers
     let mut jobs: Vec<JoinHandle<()>> = Vec::new();
@@ -645,7 +653,6 @@ async fn run_validator(cfg: Arc<Config>) {
             error_f.try_clone().unwrap(),
         ));
     }
-    drop(rx);
 
     let producer = tokio::spawn({
         let stats = stats.clone();
