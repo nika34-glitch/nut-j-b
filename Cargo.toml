@@ -35,6 +35,10 @@ libc = "0.2"
 phf = { version = "0.11", features = ["macros"] }
 # Random shuffle
 rand = "0.9"
+# Faster mutexes
+parking_lot = "0.12"
+# Memory mapped input
+memmap2 = "0.5"
 
 [profile.release]
 codegen-units = 1
