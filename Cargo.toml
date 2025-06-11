@@ -6,9 +6,9 @@ edition = "2021"
 
 [features]
 # Enable advanced I/O stacks. Build with: `--features io_uring,ebpf,afxdp`
-io_uring = ["tokio-uring"]
-ebpf = ["redbpf"]
-afxdp = ["afxdp"]
+io_uring = ["dep:tokio-uring"]
+ebpf = ["dep:redbpf"]
+afxdp = ["dep:afxdp"]
 
 [dependencies]
 # Async runtime & utils
@@ -16,13 +16,13 @@ tokio = { version = "1.38", features = ["full"] }
 # Low‑level sockets + constant access
 socket2 = "0.5"
 # Optional io_uring backend
-_tokio-uring = { package = "tokio-uring", version = "0.4", optional = true }
+tokio-uring = { version = "0.4", optional = true }
 # eBPF support (optional)
 redbpf = { version = "2", optional = true, default-features = false }
 # Jemalloc global allocator
 jemallocator = "0.5"
 # Optional AF_XDP / DPDK‑style user‑space networking
-afxdp = { version = "0.5", optional = true }
+afxdp = { version = "0.4", optional = true }
 # TLS / session resumption
 rustls = { version = "0.23", features = ["tokio"] }
 # Socks + TLS wrappers
@@ -39,9 +39,16 @@ crossterm = "0.27"
 phf = { version = "0.11", features = ["macros"] }
 # Random shuffle
 rand = "0.9"
+# Memory mapping & fast byte search
+memmap2 = "0.9"
+memchr = "2.7"
+
+[dev-dependencies]
+criterion = "0.5"
 
 [profile.release]
 codegen-units = 1
 lto = "fat"
 opt-level = 3
 panic = "abort"
+target-cpu = "native"
