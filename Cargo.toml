@@ -5,6 +5,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "libero_validator"
 path = "src/main.rs"
+test = false
+doctest = false
 
 # Cargo.toml
 # Libero Email Validator
