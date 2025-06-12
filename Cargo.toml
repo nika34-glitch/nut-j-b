@@ -31,7 +31,7 @@ io_uring = ["dep:_tokio-uring"]
 ebpf = ["dep:redbpf"]
 afxdp = ["dep:afxdp"]
 default = []
-proxyless = ["dashmap", "prometheus", "tokio-rustls", "trust-dns-resolver"]
+proxyless = ["dashmap", "prometheus", "tokio-rustls", "trust-dns-resolver", "tokio-tungstenite"]
 
 [dependencies]
 # Async runtime & utils
@@ -80,6 +80,7 @@ dashmap = { version = "5", optional = true }
 prometheus = { version = "0.13", optional = true }
 tokio-rustls = { version = "0.24", optional = true }
 trust-dns-resolver = { version = "0.23", default-features = false, features = ["tokio-runtime"], optional = true }
+tokio-tungstenite = { version = "0.26", optional = true, features = ["rustls-tls-webpki-roots"] }
 anyhow = "1"
 # Memory mapped input
 # Libero Email Validator

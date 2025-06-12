@@ -1,16 +1,25 @@
-use std::sync::Arc;
-use std::time::Duration;
+use anyhow::anyhow;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use prometheus::{IntCounterVec, IntGaugeVec, GaugeVec, register_int_counter_vec, register_int_gauge_vec, register_gauge_vec};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, time::{self, Instant}};
+use prometheus::{
+    register_gauge_vec, register_int_counter_vec, register_int_gauge_vec, GaugeVec, IntCounterVec,
+    IntGaugeVec,
+};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    time::{self, Instant},
+};
 
 /// Scheme used by a proxyless endpoint
 #[derive(Clone, Copy)]
 pub enum Scheme {
     Http,
     Https,
+    Wss,
     Tcp,
 }
 
@@ -24,7 +33,34 @@ pub struct Endpoint {
 
 impl Default for Endpoint {
     fn default() -> Self {
-        Self { host: "127.0.0.1".into(), port: 0, scheme: Scheme::Tcp }
+        Self {
+            host: "127.0.0.1".into(),
+            port: 0,
+            scheme: Scheme::Tcp,
+        }
+    }
+}
+
+impl Endpoint {
+    /// Open a TCP connection using the endpoint's tunnelling scheme.
+    pub async fn tcp_connect(&self, host: &str, port: u16) -> anyhow::Result<TcpStream> {
+        match self.scheme {
+            Scheme::Tcp => Ok(TcpStream::connect((host, port)).await?),
+            Scheme::Http | Scheme::Https | Scheme::Wss => {
+                let addr = format!("{}:{}", self.host, self.port);
+                let mut stream = TcpStream::connect(addr).await?;
+                let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
+                stream.write_all(req.as_bytes()).await?;
+                let mut buf = [0u8; 16];
+                let n = stream.read(&mut buf).await?;
+                let resp = std::str::from_utf8(&buf[..n]).unwrap_or("");
+                if resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200") {
+                    Ok(stream)
+                } else {
+                    Err(anyhow::anyhow!("CONNECT failed"))
+                }
+            }
+        }
     }
 }
 
@@ -38,7 +74,11 @@ pub struct Health {
 
 impl Default for Health {
     fn default() -> Self {
-        Self { rtt: Duration::from_millis(1), ok: true, ban_score: 0.0 }
+        Self {
+            rtt: Duration::from_millis(1),
+            ok: true,
+            ban_score: 0.0,
+        }
     }
 }
 
@@ -51,7 +91,12 @@ static LATENCY: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!("libero_proxyless_latency_seconds", "latency", &["backend"]).unwrap()
 });
 static ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!("libero_proxyless_errors_total", "errors", &["backend", "kind"]).unwrap()
+    register_int_counter_vec!(
+        "libero_proxyless_errors_total",
+        "errors",
+        &["backend", "kind"]
+    )
+    .unwrap()
 });
 static BAN_SCORE: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!("libero_proxyless_ban_score", "ban score", &["backend"]).unwrap()
@@ -81,12 +126,21 @@ macro_rules! simple_backend {
             async fn bootstrap(&self, _ctl: &Controller) -> anyhow::Result<Endpoint> {
                 Ok(Endpoint::default())
             }
-            async fn connect(&self, _ep: &Endpoint, host: &str, port: u16) -> anyhow::Result<TcpStream> {
-                Ok(TcpStream::connect((host, port)).await?)
+            async fn connect(
+                &self,
+                ep: &Endpoint,
+                host: &str,
+                port: u16,
+            ) -> anyhow::Result<TcpStream> {
+                ep.tcp_connect(host, port).await
             }
-            async fn ping(&self) -> Health { Health::default() }
+            async fn ping(&self) -> Health {
+                Health::default()
+            }
             async fn dispose(&self) {}
-            fn name(&self) -> &'static str { stringify!($name) }
+            fn name(&self) -> &'static str {
+                stringify!($name)
+            }
         }
     };
 }
@@ -135,7 +189,10 @@ struct TokenBucket {
 
 impl TokenBucket {
     fn new() -> Self {
-        Self { tokens: 0.0, last: Instant::now() }
+        Self {
+            tokens: 0.0,
+            last: Instant::now(),
+        }
     }
 
     fn refill(&mut self, max_rps: u16, now: Instant) {
@@ -178,7 +235,12 @@ pub struct ProxylessManager {
 }
 
 impl ProxylessManager {
-    pub async fn detect(max_rps: u16, quarantine: Duration, latency_weight: f32, ban_weight: f32) -> Self {
+    pub async fn detect(
+        max_rps: u16,
+        quarantine: Duration,
+        latency_weight: f32,
+        ban_weight: f32,
+    ) -> Self {
         let backends: Vec<Arc<dyn ProxylessBackend>> = vec![
             Arc::new(DenoDeploy::default()),
             Arc::new(RunKit::default()),
@@ -203,16 +265,43 @@ impl ProxylessManager {
                 quarantined: Mutex::new(None),
             }));
         }
-        Self { backends: vec, max_rps, base_quarantine: quarantine, latency_weight, ban_weight }
+        Self {
+            backends: vec,
+            max_rps,
+            base_quarantine: quarantine,
+            latency_weight,
+            ban_weight,
+        }
     }
 
-    pub fn len(&self) -> usize { self.backends.len() }
+    pub fn len(&self) -> usize {
+        self.backends.len()
+    }
 
     pub fn attempts(&self) -> Vec<(&'static str, u32)> {
         self.backends
             .iter()
             .map(|b| (b.backend.name(), *b.attempts.lock()))
             .collect()
+    }
+
+    /// Refill all backend token buckets.
+    pub fn refill_tokens(&self) {
+        let now = Instant::now();
+        for b in &self.backends {
+            b.bucket.lock().refill(self.max_rps, now);
+        }
+    }
+
+    /// Periodically decay success EWMA for all backends.
+    pub fn ewma_decay(&self) {
+        for b in &self.backends {
+            let mut ewma = b.success_ewma.lock();
+            *ewma *= 0.99;
+            SUCCESS
+                .with_label_values(&[b.backend.name()])
+                .set(*ewma as f64);
+        }
     }
 
     async fn select_backend(&self) -> Arc<BackendState> {
@@ -222,11 +311,16 @@ impl ProxylessManager {
             let mut best_score = f32::MAX;
             for b in &self.backends {
                 if let Some(exp) = *b.quarantined.lock() {
-                    if exp > now { continue; }
+                    if exp > now {
+                        continue;
+                    }
                 }
                 let mut bucket = b.bucket.lock();
-                if !bucket.take(self.max_rps, now) { continue; }
-                let load = ACTIVE.with_label_values(&[b.backend.name()]).get() as f32 / self.max_rps as f32;
+                if !bucket.take(self.max_rps, now) {
+                    continue;
+                }
+                let load = ACTIVE.with_label_values(&[b.backend.name()]).get() as f32
+                    / self.max_rps as f32;
                 let ban = *b.ban_score.lock() * self.ban_weight;
                 let lat = *b.latency_ms.lock() / 500.0 * self.latency_weight;
                 let score = load + ban + lat;
@@ -238,12 +332,21 @@ impl ProxylessManager {
                     bucket.tokens += 1.0;
                 }
             }
-            if let Some(b) = best { return b; }
+            if let Some(b) = best {
+                return b;
+            }
             time::sleep(Duration::from_millis(50)).await;
         }
     }
 
-    pub async fn pop3_login(&self, host: &str, port: u16, user: &str, pwd: &str, timeout: Duration) -> bool {
+    pub async fn pop3_login(
+        &self,
+        host: &str,
+        port: u16,
+        user: &str,
+        pwd: &str,
+        timeout: Duration,
+    ) -> bool {
         let b = self.select_backend().await;
         *b.attempts.lock() += 1;
         ACTIVE.with_label_values(&[b.backend.name()]).inc();
@@ -255,28 +358,31 @@ impl ProxylessManager {
             let mut buf = [0u8; 4];
             stream.read_exact(&mut buf).await.ok()?;
             Some(&buf[..3] == b"+OK")
-        }).await;
+        })
+        .await;
         ACTIVE.with_label_values(&[b.backend.name()]).dec();
         let lat = Instant::now().duration_since(start).as_millis() as f32;
         {
             let mut l = b.latency_ms.lock();
             *l = if *l == 0.0 { lat } else { *l * 0.9 + lat * 0.1 };
-            LATENCY.with_label_values(&[b.backend.name()]).set(*l as f64 / 1000.0);
+            LATENCY
+                .with_label_values(&[b.backend.name()])
+                .set(*l as f64 / 1000.0);
         }
         match res {
             Ok(Some(true)) => {
                 {
                     *b.success_ewma.lock() = 0.9 * *b.success_ewma.lock() + 0.1;
-                    SUCCESS.with_label_values(&[b.backend.name()]).set(*b.success_ewma.lock() as f64);
+                    SUCCESS
+                        .with_label_values(&[b.backend.name()])
+                        .set(*b.success_ewma.lock() as f64);
                 }
                 *b.ban_score.lock() = 0.0;
                 *b.failures.lock() = 0;
                 *b.quarantined.lock() = None;
                 true
             }
-            Ok(Some(false)) => {
-                false
-            }
+            Ok(Some(false)) => false,
             _ => {
                 ERRORS.with_label_values(&[b.backend.name(), "net"]).inc();
                 {
@@ -288,10 +394,11 @@ impl ProxylessManager {
                 }
                 let mut bs = b.ban_score.lock();
                 *bs += 1.0;
-                BAN_SCORE.with_label_values(&[b.backend.name()]).set(*bs as f64);
+                BAN_SCORE
+                    .with_label_values(&[b.backend.name()])
+                    .set(*bs as f64);
                 false
             }
         }
     }
 }
-
