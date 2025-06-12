@@ -1,3 +1,11 @@
+[lib]
+name = "libero_validator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "libero_validator"
+path = "src/main.rs"
+
 # Cargo.toml
 # Libero Email Validator
 #Tool Description: Libero Email Credential Validator (LECV)
@@ -22,6 +30,8 @@ edition = "2021"
 io_uring = ["dep:_tokio-uring"]
 ebpf = ["dep:redbpf"]
 afxdp = ["dep:afxdp"]
+default = []
+proxyless = ["dashmap", "prometheus", "tokio-rustls", "trust-dns-resolver"]
 
 [dependencies]
 # Async runtime & utils
@@ -66,6 +76,11 @@ parking_lot = "0.12"
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
+dashmap = { version = "5", optional = true }
+prometheus = { version = "0.13", optional = true }
+tokio-rustls = { version = "0.24", optional = true }
+trust-dns-resolver = { version = "0.23", default-features = false, features = ["tokio-runtime"], optional = true }
+anyhow = "1"
 # Memory mapped input
 # Libero Email Validator
 #Tool Description: Libero Email Credential Validator (LECV)
@@ -86,3 +101,8 @@ codegen-units = 1
 lto = "fat"
 opt-level = 3
 panic = "abort"
+
+[dev-dependencies]
+wiremock = "0.5"
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+

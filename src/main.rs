@@ -675,6 +675,8 @@ struct Config {
     shards: usize,
     proxyless: bool,
     backend: Option<String>,
+    rps: u16,
+    quarantine: u64,
     _nic_queue_pin: bool,
 }
 
@@ -732,6 +734,12 @@ struct Cli {
     /// Force a specific proxyless backend
     #[arg(long = "proxyless-backend")]
     backend: Option<String>,
+    /// Override proxyless RPS
+    #[arg(long = "proxyless-rps")]
+    rps: Option<u16>,
+    /// Quarantine TTL seconds
+    #[arg(long = "proxyless-quarantine")]
+    quarantine: Option<u64>,
     /// Shards (fork processes)
     //Tool Description: Libero Email Credential Validator (LECV)
 //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
@@ -766,6 +774,8 @@ fn merge_cfg(cli: Cli) -> Config {
         shards: cli.shards,
         proxyless: cli.proxyless,
         backend: cli.backend.clone(),
+        rps: cli.rps.unwrap_or(crate::proxyless::MAX_RPS),
+        quarantine: cli.quarantine.unwrap_or(900),
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc { cfg.concurrency = c; }
@@ -791,7 +801,7 @@ fn merge_cfg(cli: Cli) -> Config {
 //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 async fn run_validator(cfg: Arc<Config>) {
     let proxyless = if cfg.proxyless {
-        Some(Arc::new(proxyless::ProxylessManager::detect().await))
+        Some(Arc::new(proxyless::ProxylessManager::detect(cfg.rps, Duration::from_secs(cfg.quarantine)).await))
     } else {
         None
     };
