@@ -1573,6 +1573,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
+dependencies = [
+ "base64 0.21.7",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2069,22 +2078,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3119112651c157f4488931a01e586aa459736e9d6046d3bd9105ffb69352d374"
 dependencies = [
  "async-trait",
+ "bytes",
  "cfg-if",
  "data-encoding",
  "enum-as-inner",
  "futures-channel",
  "futures-io",
  "futures-util",
+ "h2",
+ "http 0.2.12",
  "idna 0.4.0",
  "ipnet",
  "once_cell",
  "rand 0.8.5",
+ "rustls 0.21.12",
+ "rustls-pemfile",
+ "rustls-webpki 0.101.7",
  "smallvec",
  "thiserror 1.0.69",
  "tinyvec",
  "tokio",
+ "tokio-rustls 0.24.1",
  "tracing",
  "url",
+ "webpki-roots 0.25.4",
 ]
 
 [[package]]
@@ -2099,11 +2116,14 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "rand 0.8.5",
+ "rustls 0.21.12",
  "smallvec",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls 0.24.1",
  "tracing",
  "trust-dns-proto",
+ "webpki-roots 0.25.4",
 ]
 
 [[package]]
@@ -2241,6 +2261,12 @@ checksum = "9683f9a5a998d873c0d21fcbe3c083009670149a8fab228644b8bd36b2c48cb3"
 dependencies = [
  "wit-bindgen-rt",
 ]
+
+[[package]]
+name = "webpki-roots"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f20c57d8d7db6d3b86154206ae5d8fba62dd39573114de97c2cb0578251f8e1"
 
 [[package]]
 name = "webpki-roots"

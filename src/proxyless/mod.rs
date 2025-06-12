@@ -2,19 +2,37 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use rand::random;
 use prometheus::{
     register_gauge_vec, register_int_counter_vec, register_int_gauge_vec, GaugeVec, IntCounterVec,
     IntGaugeVec,
 };
+use rand::random;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::OnceCell,
     time::{self, Instant},
 };
+use tokio_rustls::rustls;
+use trust_dns_resolver::{
+    config::{ResolverConfig, ResolverOpts},
+    TokioAsyncResolver,
+};
+
+static DOH: OnceCell<Arc<TokioAsyncResolver>> = OnceCell::const_new();
+
+async fn doh_resolver() -> Arc<TokioAsyncResolver> {
+    DOH.get_or_init(|| async {
+        let cfg = ResolverConfig::cloudflare_https();
+        let opts = ResolverOpts::default();
+        Arc::new(TokioAsyncResolver::tokio(cfg, opts))
+    })
+    .await
+    .clone()
+}
 
 /// Scheme used by a proxyless endpoint
 #[derive(Clone, Copy)]
@@ -74,7 +92,10 @@ impl Drop for PooledStream {
             let mut pool = self.pool.conns.lock();
             let now = Instant::now();
             pool.retain(|p| now.duration_since(p.last_used) <= self.pool.idle);
-            pool.push(PoolItem { stream, last_used: now });
+            pool.push(PoolItem {
+                stream,
+                last_used: now,
+            });
         }
     }
 }
@@ -86,6 +107,7 @@ pub struct Endpoint {
     pub port: u16,
     pub scheme: Scheme,
     pool: Arc<StreamPool>,
+    tls_cache: Arc<rustls::client::ClientSessionMemoryCache>,
 }
 
 impl Default for Endpoint {
@@ -95,6 +117,7 @@ impl Default for Endpoint {
             port: 0,
             scheme: Scheme::Tcp,
             pool: Arc::new(StreamPool::new(Duration::from_secs(30))),
+            tls_cache: Arc::new(rustls::client::ClientSessionMemoryCache::new(32)),
         }
     }
 }
@@ -103,7 +126,26 @@ impl Endpoint {
     /// Open a TCP connection using the endpoint's tunnelling scheme.
     pub async fn tcp_connect(&self, host: &str, port: u16) -> anyhow::Result<TcpStream> {
         match self.scheme {
-            Scheme::Tcp => Ok(TcpStream::connect((host, port)).await?),
+            Scheme::Tcp => {
+                let resolver = doh_resolver().await;
+                let ips = resolver.lookup_ip(host).await?;
+                let mut v6: Vec<std::net::SocketAddr> = Vec::new();
+                let mut v4: Vec<std::net::SocketAddr> = Vec::new();
+                for ip in ips {
+                    let addr = (ip, port).into();
+                    if ip.is_ipv6() {
+                        v6.push(addr);
+                    } else {
+                        v4.push(addr);
+                    }
+                }
+                for a in v6.into_iter().chain(v4.into_iter()) {
+                    if let Ok(s) = TcpStream::connect(a).await {
+                        return Ok(s);
+                    }
+                }
+                Err(anyhow!("connect failed"))
+            }
             Scheme::Http | Scheme::Https | Scheme::Wss => {
                 let addr = format!("{}:{}", self.host, self.port);
                 let mut stream = TcpStream::connect(addr).await?;
