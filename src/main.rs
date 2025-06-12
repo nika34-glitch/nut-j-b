@@ -78,6 +78,17 @@ mod proxyless {
         ) -> bool {
             false
         }
+        pub async fn pop3_login_dual(
+            &self,
+            _host: &str,
+            _ssl_port: u16,
+            _plain_port: u16,
+            _user: &str,
+            _pwd: &str,
+            _timeout: Duration,
+        ) -> bool {
+            false
+        }
     }
 }
 
@@ -603,30 +614,25 @@ fn create_consumer(
 
             for retry in 0..=cfg.max_retries {
                 if let Some(pm) = &proxyless {
-                    for item in &matrix {
-                        if let MatrixItem::Pop { host, port, .. } = item {
-                            for _ in 0..pm.len() {
-                                if pm
-                                    .pop3_login(
-                                        host,
-                                        *port,
-                                        &email,
-                                        &pwd,
-                                        Duration::from_secs_f64(cfg.timeout),
-                                    )
-                                    .await
-                                {
-                                    ok = true;
-                                    net_err = false;
-                                    break;
-                                }
-                            }
+                    let (pop_host, _) = resolve_hosts(domain);
+                    for _ in 0..pm.len() {
+                        if pm
+                            .pop3_login_dual(
+                                pop_host,
+                                cfg.pop3_ssl_port,
+                                cfg.pop3_plain_port,
+                                &email,
+                                &pwd,
+                                Duration::from_secs_f64(cfg.timeout),
+                            )
+                            .await
+                        {
+                            ok = true;
                             net_err = false;
-                            if ok {
-                                break;
-                            }
+                            break;
                         }
                     }
+                    net_err = false;
                 } else {
                     let proxy = proxies.next();
                     for item in &matrix {

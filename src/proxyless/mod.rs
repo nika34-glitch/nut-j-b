@@ -13,6 +13,11 @@ use tokio::{
     net::TcpStream,
     time::{self, Instant},
 };
+use tokio_rustls::{
+    rustls::{self, ClientConfig, RootCertStore, version, pki_types::ServerName},
+    TlsConnector,
+};
+use webpki_roots::TLS_SERVER_ROOTS;
 
 /// Scheme used by a proxyless endpoint
 #[derive(Clone, Copy)]
@@ -106,6 +111,16 @@ static ACTIVE: Lazy<IntGaugeVec> = Lazy::new(|| {
 });
 static SUCCESS: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!("libero_proxyless_success", "success rate", &["backend"]).unwrap()
+});
+
+static TLS_CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
+    let mut roots = RootCertStore::empty();
+    roots.extend(TLS_SERVER_ROOTS.iter().cloned());
+    Arc::new(
+        ClientConfig::builder_with_protocol_versions(&[&version::TLS12])
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
 });
 
 #[async_trait]
@@ -369,6 +384,107 @@ impl ProxylessManager {
                 .with_label_values(&[b.backend.name()])
                 .set(*l as f64 / 1000.0);
         }
+        match res {
+            Ok(Some(true)) => {
+                {
+                    *b.success_ewma.lock() = 0.9 * *b.success_ewma.lock() + 0.1;
+                    SUCCESS
+                        .with_label_values(&[b.backend.name()])
+                        .set(*b.success_ewma.lock() as f64);
+                }
+                *b.ban_score.lock() = 0.0;
+                *b.failures.lock() = 0;
+                *b.quarantined.lock() = None;
+                true
+            }
+            Ok(Some(false)) => false,
+            _ => {
+                ERRORS.with_label_values(&[b.backend.name(), "net"]).inc();
+                {
+                    let mut failures = b.failures.lock();
+                    *failures += 1;
+                    let backoff = self.base_quarantine.mul_f32(2f32.powi(*failures as i32));
+                    let ttl = backoff.min(Duration::from_secs(1800));
+                    *b.quarantined.lock() = Some(Instant::now() + ttl);
+                }
+                let mut bs = b.ban_score.lock();
+                *bs += 1.0;
+                BAN_SCORE
+                    .with_label_values(&[b.backend.name()])
+                    .set(*bs as f64);
+                false
+            }
+        }
+    }
+
+    pub async fn pop3_login_dual(
+        &self,
+        host: &str,
+        ssl_port: u16,
+        plain_port: u16,
+        user: &str,
+        pwd: &str,
+        timeout: Duration,
+    ) -> bool {
+        let b = self.select_backend().await;
+        *b.attempts.lock() += 1;
+        ACTIVE.with_label_values(&[b.backend.name()]).inc();
+        let start = Instant::now();
+
+        async fn attempt(
+            b: Arc<BackendState>,
+            host: String,
+            port: u16,
+            user: String,
+            pwd: String,
+            tls: bool,
+        ) -> Option<bool> {
+            let tcp = b.backend.connect(&b.endpoint, &host, port).await.ok()?;
+            if tls {
+                let connector = TlsConnector::from(TLS_CONFIG.clone());
+                let server = ServerName::try_from(host.as_str()).ok()?.to_owned();
+                let mut stream = connector.connect(server, tcp).await.ok()?;
+                let req = format!("USER {}\r\nPASS {}\r\nQUIT\r\n", user, pwd);
+                stream.write_all(req.as_bytes()).await.ok()?;
+                let mut buf = [0u8; 4];
+                stream.read_exact(&mut buf).await.ok()?;
+                let _ = stream.shutdown().await;
+                Some(&buf[..3] == b"+OK")
+            } else {
+                let mut stream = tcp;
+                let req = format!("USER {}\r\nPASS {}\r\nQUIT\r\n", user, pwd);
+                stream.write_all(req.as_bytes()).await.ok()?;
+                let mut buf = [0u8; 4];
+                stream.read_exact(&mut buf).await.ok()?;
+                let _ = stream.shutdown().await;
+                Some(&buf[..3] == b"+OK")
+            }
+        }
+
+        let host_s = host.to_string();
+        let user_s = user.to_string();
+        let pwd_s = pwd.to_string();
+        let fut_ssl = attempt(b.clone(), host_s.clone(), ssl_port, user_s.clone(), pwd_s.clone(), true);
+        let fut_plain = attempt(b.clone(), host_s, plain_port, user_s, pwd_s, false);
+
+        let res = time::timeout(timeout, async {
+            tokio::select! {
+                r = fut_ssl => r,
+                r = fut_plain => r,
+            }
+        })
+        .await;
+
+        ACTIVE.with_label_values(&[b.backend.name()]).dec();
+        let lat = Instant::now().duration_since(start).as_millis() as f32;
+        {
+            let mut l = b.latency_ms.lock();
+            *l = if *l == 0.0 { lat } else { *l * 0.9 + lat * 0.1 };
+            LATENCY
+                .with_label_values(&[b.backend.name()])
+                .set(*l as f64 / 1000.0);
+        }
+
         match res {
             Ok(Some(true)) => {
                 {

@@ -31,7 +31,14 @@ io_uring = ["dep:_tokio-uring"]
 ebpf = ["dep:redbpf"]
 afxdp = ["dep:afxdp"]
 default = []
-proxyless = ["dashmap", "prometheus", "tokio-rustls", "trust-dns-resolver", "tokio-tungstenite"]
+proxyless = [
+    "dashmap",
+    "prometheus",
+    "tokio-rustls",
+    "trust-dns-resolver",
+    "tokio-tungstenite",
+    "webpki-roots",
+]
 
 [dependencies]
 # Async runtime & utils
@@ -78,7 +85,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 dashmap = { version = "5", optional = true }
 prometheus = { version = "0.13", optional = true }
-tokio-rustls = { version = "0.24", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+webpki-roots = { version = "0.26", optional = true }
 trust-dns-resolver = { version = "0.23", default-features = false, features = ["tokio-runtime"], optional = true }
 tokio-tungstenite = { version = "0.26", optional = true, features = ["rustls-tls-webpki-roots"] }
 anyhow = "1"
