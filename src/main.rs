@@ -448,16 +448,69 @@ mod tests {
 
 // ---------------------------------------------------------------------------
 // ENH realtime dashboard ticker (replaces sleep loop)
-fn make_table(stats: &Stats, start: Instant) {
+fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) {
+    let total = stats.total.load(Ordering::Relaxed);
+    let checked = stats.checked.load(Ordering::Relaxed);
+    let valid = stats.valid.load(Ordering::Relaxed);
+    let invalid = stats.invalid.load(Ordering::Relaxed);
+    let errors = stats.errors.load(Ordering::Relaxed);
+    let retries = stats.retries.load(Ordering::Relaxed);
+
     let elapsed = start.elapsed().as_secs_f64();
+    let remaining = total.saturating_sub(checked);
+    let cps = if elapsed > 0.0 { checked as f64 / elapsed } else { 0.0 };
+    let cpm = cps * 60.0;
+    let progress = if total > 0 {
+        (checked as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let eta_secs = if cps > 0.0 { remaining as f64 / cps } else { 0.0 };
+    let eta = Duration::from_secs_f64(eta_secs);
+    let valid_rate = if checked > 0 {
+        (valid as f64 / checked as f64) * 100.0
+    } else {
+        0.0
+    };
+    let invalid_rate = if checked > 0 {
+        (invalid as f64 / checked as f64) * 100.0
+    } else {
+        0.0
+    };
+    let error_rate = if checked > 0 {
+        (errors as f64 / checked as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let bar_width = 20usize;
+    let filled = ((progress / 100.0) * bar_width as f64) as usize;
+    let bar = format!(
+        "[{}{}]",
+        "#".repeat(filled),
+        "-".repeat(bar_width - filled)
+    );
+
     println!(
-        "Total: {} Checked: {} Valid: {} Invalid: {} Errors: {} Elapsed: {:.1}s",
-        stats.total.load(Ordering::Relaxed),
-        stats.checked.load(Ordering::Relaxed),
-        stats.valid.load(Ordering::Relaxed),
-        stats.invalid.load(Ordering::Relaxed),
-        stats.errors.load(Ordering::Relaxed),
-        elapsed
+        "tot:{} chk:{} ok:{} bad:{} err:{} ret:{} rem:{} cps:{:.1} cpm:{:.1} ok%:{:.1} bad%:{:.1} err%:{:.1} prog:{:.1}% {} eta:{:.1}s run:{:.1}s conc:{} prx:{}",
+        total,
+        checked,
+        valid,
+        invalid,
+        errors,
+        retries,
+        remaining,
+        cps,
+        cpm,
+        valid_rate,
+        invalid_rate,
+        error_rate,
+        progress,
+        bar,
+        eta.as_secs_f64(),
+        elapsed,
+        cfg.concurrency,
+        proxies.size()
     );
 }
 
@@ -757,7 +810,7 @@ async fn run_validator(cfg: Arc<Config>) {
     let mut ticker = interval(Duration::from_secs_f64(cfg.refresh)); // ~60 Hz
     loop {
         ticker.tick().await; // This yields exactly each refresh interval
-        make_table(&stats, start);
+        make_table(&stats, start, &cfg, &proxies);
         if stats.checked.load(Ordering::Relaxed) >= stats.total.load(Ordering::Relaxed) {
             break;
         }
