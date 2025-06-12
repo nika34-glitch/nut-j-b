@@ -1,3 +1,5 @@
+#![cfg(feature = "proxyless")]
+
 use libero_validator::proxyless::ProxylessManager;
 use std::time::Duration;
 

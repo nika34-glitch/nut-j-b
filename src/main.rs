@@ -48,7 +48,38 @@ use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tracing_subscriber;
 
+#[cfg(feature = "proxyless")]
 mod proxyless;
+#[cfg(not(feature = "proxyless"))]
+mod proxyless {
+    use std::time::Duration;
+    #[derive(Clone)]
+    pub struct ProxylessManager;
+    pub const MAX_RPS: u16 = 15;
+    impl ProxylessManager {
+        pub async fn detect(
+            _rps: u16,
+            _q: Duration,
+            _lw: f32,
+            _bw: f32,
+        ) -> Self {
+            Self
+        }
+        pub fn len(&self) -> usize { 0 }
+        pub fn refill_tokens(&self) {}
+        pub fn ewma_decay(&self) {}
+        pub async fn pop3_login(
+            &self,
+            _host: &str,
+            _port: u16,
+            _user: &str,
+            _pwd: &str,
+            _timeout: Duration,
+        ) -> bool {
+            false
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
