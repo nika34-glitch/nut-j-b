@@ -7,6 +7,8 @@ use prometheus::{
     IntGaugeVec,
 };
 use rand::random;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +25,51 @@ use trust_dns_resolver::{
 };
 
 static DOH: OnceCell<Arc<TokioAsyncResolver>> = OnceCell::const_new();
+
+static MOCK_DNS: Lazy<Mutex<HashMap<String, Vec<IpAddr>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static CONNECT_DELAY: Lazy<Mutex<HashMap<SocketAddr, Duration>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+pub fn mock_dns(host: &str, addrs: Vec<IpAddr>) {
+    MOCK_DNS.lock().insert(host.to_string(), addrs);
+}
+
+pub fn clear_mock_dns() {
+    MOCK_DNS.lock().clear();
+}
+
+pub fn mock_connect_delay(addr: SocketAddr, d: Duration) {
+    CONNECT_DELAY.lock().insert(addr, d);
+}
+
+pub fn clear_connect_delay() {
+    CONNECT_DELAY.lock().clear();
+}
+
+async fn lookup_ips(host: &str) -> anyhow::Result<Vec<IpAddr>> {
+    if let Some(ips) = MOCK_DNS.lock().get(host).cloned() {
+        return Ok(ips);
+    }
+    let resolver = doh_resolver().await;
+    let ips = resolver.lookup_ip(host).await?;
+    Ok(ips.iter().collect())
+}
+
+async fn connect_socket(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    let stream = TcpStream::connect(addr).await?;
+    #[cfg(test)]
+    {
+        let delay_opt = {
+            let guard = CONNECT_DELAY.lock();
+            guard.get(&addr).copied()
+        };
+        if let Some(delay) = delay_opt {
+            time::sleep(delay).await;
+        }
+    }
+    Ok(stream)
+}
 
 async fn doh_resolver() -> Arc<TokioAsyncResolver> {
     DOH.get_or_init(|| async {
@@ -127,24 +174,50 @@ impl Endpoint {
     pub async fn tcp_connect(&self, host: &str, port: u16) -> anyhow::Result<TcpStream> {
         match self.scheme {
             Scheme::Tcp => {
-                let resolver = doh_resolver().await;
-                let ips = resolver.lookup_ip(host).await?;
-                let mut v6: Vec<std::net::SocketAddr> = Vec::new();
-                let mut v4: Vec<std::net::SocketAddr> = Vec::new();
+                let ips = lookup_ips(host).await?;
+                let mut v6: Vec<SocketAddr> = Vec::new();
+                let mut v4: Vec<SocketAddr> = Vec::new();
                 for ip in ips {
-                    let addr = (ip, port).into();
+                    let addr = SocketAddr::new(ip, port);
                     if ip.is_ipv6() {
                         v6.push(addr);
                     } else {
                         v4.push(addr);
                     }
                 }
-                for a in v6.into_iter().chain(v4.into_iter()) {
-                    if let Ok(s) = TcpStream::connect(a).await {
-                        return Ok(s);
+
+                let mut ipv6: Option<(Duration, TcpStream)> = None;
+                for a in v6 {
+                    let start = Instant::now();
+                    if let Ok(s) = connect_socket(a).await {
+                        ipv6 = Some((start.elapsed(), s));
+                        break;
                     }
                 }
-                Err(anyhow!("connect failed"))
+
+                let mut ipv4: Option<(Duration, TcpStream)> = None;
+                for a in v4 {
+                    let start = Instant::now();
+                    if let Ok(s) = connect_socket(a).await {
+                        ipv4 = Some((start.elapsed(), s));
+                        break;
+                    }
+                }
+
+                match (ipv6, ipv4) {
+                    (Some((d6, s6)), Some((d4, s4))) => {
+                        if d6.as_secs_f64() <= d4.as_secs_f64() * 1.2 {
+                            drop(s4);
+                            Ok(s6)
+                        } else {
+                            drop(s6);
+                            Ok(s4)
+                        }
+                    }
+                    (Some((_d6, s6)), None) => Ok(s6),
+                    (None, Some((_d4, s4))) => Ok(s4),
+                    _ => Err(anyhow!("connect failed")),
+                }
             }
             Scheme::Http | Scheme::Https | Scheme::Wss => {
                 let addr = format!("{}:{}", self.host, self.port);
