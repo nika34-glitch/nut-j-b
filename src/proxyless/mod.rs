@@ -2,6 +2,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use rand::random;
 use prometheus::{
     register_gauge_vec, register_int_counter_vec, register_int_gauge_vec, GaugeVec, IntCounterVec,
     IntGaugeVec,
@@ -276,9 +278,13 @@ impl TokenBucket {
     }
 
     fn take(&mut self, max_rps: u16, now: Instant) -> bool {
+        self.take_n(max_rps, now, 1)
+    }
+
+    fn take_n(&mut self, max_rps: u16, now: Instant, n: u8) -> bool {
         self.refill(max_rps, now);
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
+        if self.tokens >= n as f32 {
+            self.tokens -= n as f32;
             true
         } else {
             false
@@ -296,6 +302,7 @@ struct BackendState {
     success_ewma: Mutex<f32>,
     failures: Mutex<u32>,
     quarantined: Mutex<Option<Instant>>, // until
+    idx: usize,
 }
 
 pub struct ProxylessManager {
@@ -304,6 +311,8 @@ pub struct ProxylessManager {
     base_quarantine: Duration,
     latency_weight: f32,
     ban_weight: f32,
+    current: AtomicUsize,
+    batch_left: AtomicU8,
 }
 
 impl ProxylessManager {
@@ -320,7 +329,7 @@ impl ProxylessManager {
         ];
         let ctl = Controller;
         let mut vec = Vec::new();
-        for b in backends {
+        for (idx, b) in backends.into_iter().enumerate() {
             let endpoint = match time::timeout(Duration::from_secs(20), b.bootstrap(&ctl)).await {
                 Ok(Ok(ep)) => ep,
                 _ => Endpoint::default(),
@@ -335,6 +344,7 @@ impl ProxylessManager {
                 success_ewma: Mutex::new(0.0),
                 failures: Mutex::new(0),
                 quarantined: Mutex::new(None),
+                idx,
             }));
         }
         Self {
@@ -343,6 +353,8 @@ impl ProxylessManager {
             base_quarantine: quarantine,
             latency_weight,
             ban_weight,
+            current: AtomicUsize::new(0),
+            batch_left: AtomicU8::new(0),
         }
     }
 
@@ -378,6 +390,12 @@ impl ProxylessManager {
 
     async fn select_backend(&self) -> Arc<BackendState> {
         loop {
+            let remaining = self.batch_left.load(Ordering::Acquire);
+            if remaining > 0 {
+                let idx = self.current.load(Ordering::Acquire);
+                return self.backends[idx].clone();
+            }
+
             let now = Instant::now();
             let mut best: Option<Arc<BackendState>> = None;
             let mut best_score = f32::MAX;
@@ -420,6 +438,23 @@ impl ProxylessManager {
         timeout: Duration,
     ) -> bool {
         let b = self.select_backend().await;
+
+        if self.batch_left.load(Ordering::Acquire) == 0 {
+            let batch = rand::random::<u8>() % 5 + 4; // 4-8
+            let mut bucket = b.bucket.lock();
+            let mut now = Instant::now();
+            while !bucket.take_n(self.max_rps, now, batch) {
+                drop(bucket);
+                time::sleep(Duration::from_millis(50)).await;
+                now = Instant::now();
+                bucket = b.bucket.lock();
+            }
+            self.batch_left.store(batch, Ordering::Release);
+            self.current.store(b.idx, Ordering::Release);
+        } else {
+            self.batch_left.fetch_sub(1, Ordering::AcqRel);
+        }
+
         *b.attempts.lock() += 1;
         ACTIVE.with_label_values(&[b.backend.name()]).inc();
         let start = Instant::now();
