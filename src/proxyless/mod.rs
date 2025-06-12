@@ -436,6 +436,7 @@ impl ProxylessManager {
         user: &str,
         pwd: &str,
         timeout: Duration,
+        _fast_open: bool,
     ) -> bool {
         let b = self.select_backend().await;
 

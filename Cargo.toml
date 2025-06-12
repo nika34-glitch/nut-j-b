@@ -32,6 +32,7 @@ ebpf = ["dep:redbpf"]
 afxdp = ["dep:afxdp"]
 default = []
 proxyless = ["dashmap", "prometheus", "tokio-rustls", "trust-dns-resolver", "tokio-tungstenite"]
+fast-open = []
 
 [dependencies]
 # Async runtime & utils
