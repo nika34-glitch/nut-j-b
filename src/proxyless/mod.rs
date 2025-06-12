@@ -23,12 +23,67 @@ pub enum Scheme {
     Tcp,
 }
 
+struct PoolItem {
+    stream: TcpStream,
+    last_used: Instant,
+}
+
+struct StreamPool {
+    conns: Mutex<Vec<PoolItem>>,
+    idle: Duration,
+}
+
+impl StreamPool {
+    fn new(idle: Duration) -> Self {
+        Self {
+            conns: Mutex::new(Vec::new()),
+            idle,
+        }
+    }
+}
+
+impl Drop for StreamPool {
+    fn drop(&mut self) {
+        self.conns.lock().clear();
+    }
+}
+
+pub struct PooledStream {
+    stream: Option<TcpStream>,
+    pool: Arc<StreamPool>,
+}
+
+impl std::ops::Deref for PooledStream {
+    type Target = TcpStream;
+    fn deref(&self) -> &TcpStream {
+        self.stream.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for PooledStream {
+    fn deref_mut(&mut self) -> &mut TcpStream {
+        self.stream.as_mut().unwrap()
+    }
+}
+
+impl Drop for PooledStream {
+    fn drop(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            let mut pool = self.pool.conns.lock();
+            let now = Instant::now();
+            pool.retain(|p| now.duration_since(p.last_used) <= self.pool.idle);
+            pool.push(PoolItem { stream, last_used: now });
+        }
+    }
+}
+
 /// Exposed egress endpoint
 #[derive(Clone)]
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
     pub scheme: Scheme,
+    pool: Arc<StreamPool>,
 }
 
 impl Default for Endpoint {
@@ -37,6 +92,7 @@ impl Default for Endpoint {
             host: "127.0.0.1".into(),
             port: 0,
             scheme: Scheme::Tcp,
+            pool: Arc::new(StreamPool::new(Duration::from_secs(30))),
         }
     }
 }
@@ -61,6 +117,22 @@ impl Endpoint {
                 }
             }
         }
+    }
+
+    pub async fn checkout(&self, host: &str, port: u16) -> anyhow::Result<PooledStream> {
+        let mut conn = {
+            let mut pool = self.pool.conns.lock();
+            let now = Instant::now();
+            pool.retain(|p| now.duration_since(p.last_used) <= self.pool.idle);
+            pool.pop().map(|p| p.stream)
+        };
+        if conn.is_none() {
+            conn = Some(self.tcp_connect(host, port).await?);
+        }
+        Ok(PooledStream {
+            stream: conn,
+            pool: self.pool.clone(),
+        })
     }
 }
 
@@ -111,7 +183,7 @@ static SUCCESS: Lazy<GaugeVec> = Lazy::new(|| {
 #[async_trait]
 pub trait ProxylessBackend: Send + Sync + 'static {
     async fn bootstrap(&self, _ctl: &Controller) -> anyhow::Result<Endpoint>;
-    async fn connect(&self, ep: &Endpoint, host: &str, port: u16) -> anyhow::Result<TcpStream>;
+    async fn connect(&self, ep: &Endpoint, host: &str, port: u16) -> anyhow::Result<PooledStream>;
     async fn ping(&self) -> Health;
     async fn dispose(&self);
     fn name(&self) -> &'static str;
@@ -131,8 +203,8 @@ macro_rules! simple_backend {
                 ep: &Endpoint,
                 host: &str,
                 port: u16,
-            ) -> anyhow::Result<TcpStream> {
-                ep.tcp_connect(host, port).await
+            ) -> anyhow::Result<PooledStream> {
+                ep.checkout(host, port).await
             }
             async fn ping(&self) -> Health {
                 Health::default()
