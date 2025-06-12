@@ -677,6 +677,8 @@ struct Config {
     backend: Option<String>,
     rps: u16,
     quarantine: u64,
+    latency_weight: f32,
+    ban_weight: f32,
     _nic_queue_pin: bool,
 }
 
@@ -740,6 +742,10 @@ struct Cli {
     /// Quarantine TTL seconds
     #[arg(long = "proxyless-quarantine")]
     quarantine: Option<u64>,
+    #[arg(long = "proxyless-latency-weight", default_value_t = 1.0)]
+    latency_weight: f32,
+    #[arg(long = "proxyless-ban-weight", default_value_t = 1.5)]
+    ban_weight: f32,
     /// Shards (fork processes)
     //Tool Description: Libero Email Credential Validator (LECV)
 //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
@@ -776,6 +782,8 @@ fn merge_cfg(cli: Cli) -> Config {
         backend: cli.backend.clone(),
         rps: cli.rps.unwrap_or(crate::proxyless::MAX_RPS),
         quarantine: cli.quarantine.unwrap_or(900),
+        latency_weight: cli.latency_weight,
+        ban_weight: cli.ban_weight,
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc { cfg.concurrency = c; }
@@ -801,7 +809,12 @@ fn merge_cfg(cli: Cli) -> Config {
 //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 async fn run_validator(cfg: Arc<Config>) {
     let proxyless = if cfg.proxyless {
-        Some(Arc::new(proxyless::ProxylessManager::detect(cfg.rps, Duration::from_secs(cfg.quarantine)).await))
+        Some(Arc::new(proxyless::ProxylessManager::detect(
+            cfg.rps,
+            Duration::from_secs(cfg.quarantine),
+            cfg.latency_weight,
+            cfg.ban_weight,
+        ).await))
     } else {
         None
     };

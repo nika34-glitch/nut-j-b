@@ -104,5 +104,5 @@ panic = "abort"
 
 [dev-dependencies]
 wiremock = "0.5"
-tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "test-util"] }
 

@@ -1,11 +1,10 @@
-use std::time::{Duration, Instant};
-use async_trait::async_trait;
-use dashmap::DashMap;
-use once_cell::sync::Lazy;
-use prometheus::{IntCounterVec, IntGaugeVec, GaugeVec, register_int_counter_vec, register_int_gauge_vec, register_gauge_vec};
-use tokio::{net::TcpStream, io::{AsyncReadExt, AsyncWriteExt}};
-use tokio::time;
 use std::sync::Arc;
+use std::time::Duration;
+use async_trait::async_trait;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
+use prometheus::{IntCounterVec, IntGaugeVec, GaugeVec, register_int_counter_vec, register_int_gauge_vec, register_gauge_vec};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, time::{self, Instant}};
 
 /// Scheme used by a proxyless endpoint
 #[derive(Clone, Copy)]
@@ -60,10 +59,14 @@ static BAN_SCORE: Lazy<GaugeVec> = Lazy::new(|| {
 static ACTIVE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!("libero_proxyless_active", "active", &["backend"]).unwrap()
 });
+static SUCCESS: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!("libero_proxyless_success", "success rate", &["backend"]).unwrap()
+});
 
 #[async_trait]
 pub trait ProxylessBackend: Send + Sync + 'static {
     async fn bootstrap(&self, _ctl: &Controller) -> anyhow::Result<Endpoint>;
+    async fn connect(&self, ep: &Endpoint, host: &str, port: u16) -> anyhow::Result<TcpStream>;
     async fn ping(&self) -> Health;
     async fn dispose(&self);
     fn name(&self) -> &'static str;
@@ -77,6 +80,9 @@ macro_rules! simple_backend {
         impl ProxylessBackend for $name {
             async fn bootstrap(&self, _ctl: &Controller) -> anyhow::Result<Endpoint> {
                 Ok(Endpoint::default())
+            }
+            async fn connect(&self, _ep: &Endpoint, host: &str, port: u16) -> anyhow::Result<TcpStream> {
+                Ok(TcpStream::connect((host, port)).await?)
             }
             async fn ping(&self) -> Health { Health::default() }
             async fn dispose(&self) {}
@@ -122,91 +128,128 @@ simple_backend!(TryItOnline);
 simple_backend!(OpenRestyPlay);
 simple_backend!(TryCF);
 
+struct TokenBucket {
+    tokens: f32,
+    last: Instant,
+}
+
+impl TokenBucket {
+    fn new() -> Self {
+        Self { tokens: 0.0, last: Instant::now() }
+    }
+
+    fn refill(&mut self, max_rps: u16, now: Instant) {
+        let elapsed = now.duration_since(self.last).as_secs_f32();
+        if elapsed > 0.0 {
+            self.tokens = (self.tokens + elapsed * max_rps as f32).min(max_rps as f32);
+            self.last = now;
+        }
+    }
+
+    fn take(&mut self, max_rps: u16, now: Instant) -> bool {
+        self.refill(max_rps, now);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 struct BackendState {
     backend: Arc<dyn ProxylessBackend>,
     endpoint: Endpoint,
-    health: Health,
-    rate_used: f32,
-    quarantined: Option<Instant>,
+    bucket: Mutex<TokenBucket>,
+    attempts: Mutex<u32>,
+    ban_score: Mutex<f32>,
+    latency_ms: Mutex<f32>,
+    success_ewma: Mutex<f32>,
+    failures: Mutex<u32>,
+    quarantined: Mutex<Option<Instant>>, // until
 }
 
 pub struct ProxylessManager {
-    backends: DashMap<&'static str, BackendState>,
-    quarantine: Duration,
+    backends: Vec<Arc<BackendState>>,
     max_rps: u16,
+    base_quarantine: Duration,
+    latency_weight: f32,
+    ban_weight: f32,
 }
 
 impl ProxylessManager {
-    pub fn len(&self) -> usize {
-        self.backends.len()
-    }
-
-    pub async fn detect(max_rps: u16, quarantine: Duration) -> Self {
+    pub async fn detect(max_rps: u16, quarantine: Duration, latency_weight: f32, ban_weight: f32) -> Self {
         let backends: Vec<Arc<dyn ProxylessBackend>> = vec![
             Arc::new(DenoDeploy::default()),
             Arc::new(RunKit::default()),
             Arc::new(FastlyCompute::default()),
-            Arc::new(NetlifyEdge::default()),
-            Arc::new(StackBlitz::default()),
-            Arc::new(CodeSandbox::default()),
-            Arc::new(VercelEdge::default()),
-            Arc::new(BunPlayground::default()),
-            Arc::new(BinderPod::default()),
-            Arc::new(KatacodaLab::default()),
-            Arc::new(KillercodaLab::default()),
-            Arc::new(ColabTunnel::default()),
-            Arc::new(CodespaceDevurl::default()),
-            Arc::new(DroneCIExec::default()),
-            Arc::new(TravisBuild::default()),
-            Arc::new(OpenShiftPlayground::default()),
-            Arc::new(JSFiddleDebug::default()),
-            Arc::new(GlitchRemix::default()),
-            Arc::new(TioRun::default()),
-            Arc::new(PaizaIo::default()),
-            Arc::new(WasmEdgeSandbox::default()),
-            Arc::new(FastlyFiddle::default()),
-            Arc::new(StackStormWebhook::default()),
-            Arc::new(IPFSP2P::default()),
-            Arc::new(IPinfoEdge::default()),
-            Arc::new(ChiselDemo::default()),
-            Arc::new(ZeroTierMoon::default()),
-            Arc::new(FlyMachines::default()),
-            Arc::new(FermyonSpin::default()),
-            Arc::new(OpenShiftDevSandbox::default()),
-            Arc::new(WandboxCPP::default()),
-            Arc::new(BeeceptorMock::default()),
-            Arc::new(TryItOnline::default()),
-            Arc::new(OpenRestyPlay::default()),
-            Arc::new(TryCF::default()),
         ];
-        let map = DashMap::new();
         let ctl = Controller;
+        let mut vec = Vec::new();
         for b in backends {
             let endpoint = match time::timeout(Duration::from_secs(20), b.bootstrap(&ctl)).await {
                 Ok(Ok(ep)) => ep,
                 _ => Endpoint::default(),
             };
-            map.insert(b.name(), BackendState { backend: b.clone(), endpoint, health: Health::default(), rate_used: 0.0, quarantined: None });
+            vec.push(Arc::new(BackendState {
+                backend: b.clone(),
+                endpoint,
+                bucket: Mutex::new(TokenBucket::new()),
+                attempts: Mutex::new(0),
+                ban_score: Mutex::new(0.0),
+                latency_ms: Mutex::new(0.0),
+                success_ewma: Mutex::new(0.0),
+                failures: Mutex::new(0),
+                quarantined: Mutex::new(None),
+            }));
         }
-        Self { backends: map, quarantine, max_rps }
+        Self { backends: vec, max_rps, base_quarantine: quarantine, latency_weight, ban_weight }
+    }
+
+    pub fn len(&self) -> usize { self.backends.len() }
+
+    pub fn attempts(&self) -> Vec<(&'static str, u32)> {
+        self.backends
+            .iter()
+            .map(|b| (b.backend.name(), *b.attempts.lock()))
+            .collect()
+    }
+
+    async fn select_backend(&self) -> Arc<BackendState> {
+        loop {
+            let now = Instant::now();
+            let mut best: Option<Arc<BackendState>> = None;
+            let mut best_score = f32::MAX;
+            for b in &self.backends {
+                if let Some(exp) = *b.quarantined.lock() {
+                    if exp > now { continue; }
+                }
+                let mut bucket = b.bucket.lock();
+                if !bucket.take(self.max_rps, now) { continue; }
+                let load = ACTIVE.with_label_values(&[b.backend.name()]).get() as f32 / self.max_rps as f32;
+                let ban = *b.ban_score.lock() * self.ban_weight;
+                let lat = *b.latency_ms.lock() / 500.0 * self.latency_weight;
+                let score = load + ban + lat;
+                if score < best_score {
+                    best_score = score;
+                    best = Some(b.clone());
+                } else {
+                    // return token
+                    bucket.tokens += 1.0;
+                }
+            }
+            if let Some(b) = best { return b; }
+            time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     pub async fn pop3_login(&self, host: &str, port: u16, user: &str, pwd: &str, timeout: Duration) -> bool {
-        let mut selected = None;
-        for b in self.backends.iter() {
-            if let Some(q) = b.quarantined {
-                if q > Instant::now() { continue; }
-            }
-            selected = Some(b);
-            break;
-        }
-        let b = match selected {
-            Some(b) => b,
-            None => return false,
-        };
+        let b = self.select_backend().await;
+        *b.attempts.lock() += 1;
         ACTIVE.with_label_values(&[b.backend.name()]).inc();
+        let start = Instant::now();
         let res = time::timeout(timeout, async {
-            let mut stream = TcpStream::connect((host, port)).await.ok()?;
+            let mut stream = b.backend.connect(&b.endpoint, host, port).await.ok()?;
             let req = format!("USER {}\r\nPASS {}\r\nQUIT\r\n", user, pwd);
             stream.write_all(req.as_bytes()).await.ok()?;
             let mut buf = [0u8; 4];
@@ -214,11 +257,38 @@ impl ProxylessManager {
             Some(&buf[..3] == b"+OK")
         }).await;
         ACTIVE.with_label_values(&[b.backend.name()]).dec();
+        let lat = Instant::now().duration_since(start).as_millis() as f32;
+        {
+            let mut l = b.latency_ms.lock();
+            *l = if *l == 0.0 { lat } else { *l * 0.9 + lat * 0.1 };
+            LATENCY.with_label_values(&[b.backend.name()]).set(*l as f64 / 1000.0);
+        }
         match res {
-            Ok(Some(true)) => true,
-            Ok(Some(false)) => false,
+            Ok(Some(true)) => {
+                {
+                    *b.success_ewma.lock() = 0.9 * *b.success_ewma.lock() + 0.1;
+                    SUCCESS.with_label_values(&[b.backend.name()]).set(*b.success_ewma.lock() as f64);
+                }
+                *b.ban_score.lock() = 0.0;
+                *b.failures.lock() = 0;
+                *b.quarantined.lock() = None;
+                true
+            }
+            Ok(Some(false)) => {
+                false
+            }
             _ => {
                 ERRORS.with_label_values(&[b.backend.name(), "net"]).inc();
+                {
+                    let mut failures = b.failures.lock();
+                    *failures += 1;
+                    let backoff = self.base_quarantine.mul_f32(2f32.powi(*failures as i32));
+                    let ttl = backoff.min(Duration::from_secs(1800));
+                    *b.quarantined.lock() = Some(Instant::now() + ttl);
+                }
+                let mut bs = b.ban_score.lock();
+                *bs += 1.0;
+                BAN_SCORE.with_label_values(&[b.backend.name()]).set(*bs as f64);
                 false
             }
         }
