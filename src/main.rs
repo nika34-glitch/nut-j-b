@@ -26,13 +26,15 @@
 #![allow(clippy::too_many_arguments)]
 #![cfg_attr(all(feature = "io_uring", target_os = "linux"), feature(async_closure))]
 
+use bloomfilter::Bloom;
 use clap::Parser;
+use crc32fast::Hasher;
 use jemallocator::Jemalloc;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use rand::rng;
 use rand::seq::SliceRandom;
+use rand::{rng, Rng};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -704,25 +706,33 @@ fn create_consumer(
                     break;
                 }
                 stats.retries.fetch_add(1, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_secs_f64(
-                    cfg.backoff_base * (2.0_f64).powi(retry as i32),
-                ))
-                .await;
+                let exp = cfg.backoff_base * (2.0_f64).powi(retry as i32);
+                let jitter = rand::thread_rng().gen_range(0.0..exp);
+                tokio::time::sleep(Duration::from_secs_f64(jitter)).await;
             }
 
             stats.checked.fetch_add(1, Ordering::Relaxed);
             if ok {
                 stats.valid.fetch_add(1, Ordering::Relaxed);
                 let mut file = valid_f.lock();
-                writeln!(file, "{}:{}", email, pwd).ok();
+                let mut hasher = Hasher::new();
+                hasher.update(pwd.as_bytes());
+                let hash = hasher.finalize();
+                writeln!(file, "{}:{:08x}", email, hash).ok();
             } else if net_err {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
                 let mut file = error_f.lock();
-                writeln!(file, "{}:{}", email, pwd).ok();
+                let mut hasher = Hasher::new();
+                hasher.update(pwd.as_bytes());
+                let hash = hasher.finalize();
+                writeln!(file, "{}:{:08x}", email, hash).ok();
             } else {
                 stats.invalid.fetch_add(1, Ordering::Relaxed);
                 let mut file = invalid_f.lock();
-                writeln!(file, "{}:{}", email, pwd).ok();
+                let mut hasher = Hasher::new();
+                hasher.update(pwd.as_bytes());
+                let hash = hasher.finalize();
+                writeln!(file, "{}:{:08x}", email, hash).ok();
             }
         }
     })
@@ -1032,13 +1042,18 @@ async fn run_validator(cfg: Arc<Config>) {
         let cfg = cfg.clone();
         async move {
             let file = File::open(&cfg.input_file).expect("Input file not found");
+            let expected = file.metadata().map(|m| m.len() / 32).unwrap_or(1_000_000);
             let mmap = unsafe { Mmap::map(&file).expect("mmap failed") };
+            let mut dedupe = Bloom::<String>::new_for_fp_rate(expected as usize, 0.01).unwrap();
             for line in mmap.split(|&b| b == b'\n') {
                 if line.is_empty() {
                     continue;
                 }
                 let ln = std::str::from_utf8(line).unwrap_or("").trim();
                 if !ln.contains(':') {
+                    continue;
+                }
+                if dedupe.check_and_set(&ln.to_string()) {
                     continue;
                 }
                 let mut it = ln.splitn(2, ':');
