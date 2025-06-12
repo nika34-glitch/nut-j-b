@@ -34,7 +34,7 @@ use rand::seq::SliceRandom;
 use rand::rng;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -272,30 +272,31 @@ impl ProxyPool {
 }
 
 fn load_proxies(path: &str) -> ProxyPool {
-    let file = File::open(path).expect("Proxy file not found");
-    let rdr = BufReader::new(file);
-    let mut formatted = Vec::new();
+    let data = std::fs::read_to_string(path).expect("Proxy file not found");
+    let mut formatted = Vec::with_capacity(data.lines().count());
 
-    for line in rdr.lines().map_while(Result::ok) {
-        let ln = line.trim();
+    for ln in data.lines().map(str::trim) {
         if ln.is_empty() || ln.starts_with('#') {
             continue;
         }
-        let parts: Vec<_> = ln.split(':').collect();
-        if parts.len() == 2 {
-            // host:port (supports ENH#20 SOCKS4a auto proxy)
-            formatted.push(format!("socks4a://{}", ln));
-            continue;
+        let mut parts = ln.splitn(4, ':');
+        let first = parts.next().unwrap_or("");
+        let second = parts.next().unwrap_or("");
+        let third = parts.next();
+        let fourth = parts.next();
+
+        match (third, fourth) {
+            (Some(user), Some(pwd)) => {
+                formatted.push(format!("http://{}:{}@{}:{}", user, pwd, first, second));
+            }
+            (None, None) => {
+                // host:port (supports ENH#20 SOCKS4a auto proxy)
+                formatted.push(format!("socks4a://{}:{}", first, second));
+            }
+            _ => {
+                eprintln!("Skipping malformed proxy: {}", ln);
+            }
         }
-        if parts.len() != 4 {
-            eprintln!("Skipping malformed proxy: {}", ln);
-            continue;
-        }
-        let host = parts[0];
-        let port = parts[1];
-        let user = parts[2];
-        let pwd = parts[3];
-        formatted.push(format!("http://{}:{}@{}:{}", user, pwd, host, port));
     }
 
     if formatted.is_empty() {
