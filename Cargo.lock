@@ -1180,6 +1180,7 @@ dependencies = [
  "prometheus",
  "rand 0.9.1",
  "redbpf",
+ "regex",
  "reqwest",
  "socket2 0.5.10",
  "tokio",
