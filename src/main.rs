@@ -21,6 +21,7 @@
 use bloomfilter::Bloom;
 use clap::Parser;
 use jemallocator::Jemalloc;
+use libero_validator::estimate_bloom_size;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -39,7 +40,6 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
-use libero_validator::estimate_bloom_size;
 #[cfg(feature = "free")]
 use tokio_rustls::rustls::ServerName;
 #[cfg(feature = "free")]
@@ -47,7 +47,7 @@ use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore},
     TlsConnector,
 };
-use tracing_subscriber;
+use tracing_subscriber::fmt;
 
 #[cfg(feature = "free")]
 mod free;
@@ -680,8 +680,6 @@ impl Stats {
     }
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Consumer factory remains, queue capacity bumped (ENH#10)
 
@@ -1150,7 +1148,7 @@ async fn run_validator(cfg: Arc<Config>) {
 // ---------------------------------------------------------------------------
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
     set_nofile_limit();
     enable_tcp_tw_reuse(); // ENH#1 global sysctl tweak
     ebpf_filter::attach(); // ENH#22 optional eBPF

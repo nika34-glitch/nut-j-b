@@ -103,10 +103,8 @@ async fn fetch_from_command(cmd: &str, set: &mut HashSet<String>) -> Result<(), 
     let mut reader = BufReader::new(stdout).lines();
     let mut count = 0usize;
     while let Some(line) = reader.next_line().await? {
-        if !line.trim().is_empty() {
-            if set.insert(line.trim().to_lowercase()) {
-                count += 1;
-            }
+        if !line.trim().is_empty() && set.insert(line.trim().to_lowercase()) {
+            count += 1;
         }
     }
     let status = child.wait().await?;
