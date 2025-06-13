@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use serde::Deserialize;
 
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -151,7 +152,7 @@ async fn main() -> Result<()> {
         if let Err(e) = run_cycle(&mut state).await {
             eprintln!("cycle error: {e}");
         }
-        tokio::time::sleep(Duration::from_secs(600)).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
 
@@ -162,6 +163,8 @@ async fn run_cycle(state: &mut HashMap<String, ProxyState>) -> Result<()> {
         .user_agent("Mozilla/5.0")
         .build()?;
     let mut candidates = Vec::new();
+    // Fetch additional proxies from mtpro.xyz JSON API
+    candidates.extend(fetch_mtproxies(&client).await);
     let re = regex::Regex::new(r"(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})").unwrap();
     let mut fetches = FuturesUnordered::new();
     for &url in lists {
@@ -265,4 +268,39 @@ async fn test_proxy(proxy: String) -> (String, bool, Duration) {
         }
     }
     (proxy, success, start.elapsed())
+}
+
+#[derive(Deserialize)]
+struct SocksProxy {
+    ip: String,
+    port: u16,
+}
+
+#[derive(Deserialize)]
+struct MtProtoProxy {
+    host: String,
+    port: u16,
+}
+
+async fn fetch_mtproxies(client: &reqwest::Client) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(resp) = client.get("https://mtpro.xyz/api/?type=socks").send().await {
+        if let Ok(body) = resp.text().await {
+            if let Ok(list) = serde_json::from_str::<Vec<SocksProxy>>(&body) {
+                for p in list {
+                    out.push(format!("{}:{}", p.ip, p.port));
+                }
+            }
+        }
+    }
+    if let Ok(resp) = client.get("https://mtpro.xyz/api/?type=mtproto").send().await {
+        if let Ok(body) = resp.text().await {
+            if let Ok(list) = serde_json::from_str::<Vec<MtProtoProxy>>(&body) {
+                for p in list {
+                    out.push(format!("{}:{}", p.host, p.port));
+                }
+            }
+        }
+    }
+    out
 }
