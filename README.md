@@ -10,6 +10,17 @@ file and append them to an output list.
 cargo run -p proxy_feed -- fetch --config config.toml --output feeds/all_proxies.txt
 ```
 
+### OtoProxy helper
+
+For additional proxy sources the repository ships a small Python script
+`otoproxy/otoproxy.py`. It scrapes URLs listed in `otoproxy/sites.txt`, tests the
+proxies and stores the working ones in the `feeds/` directory. Run it manually
+with:
+
+```bash
+python otoproxy/otoproxy.py
+```
+
 #Tool Description: Libero Email Credential Validator (LECV)
 #The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
 #Key legitimate use cases include:
