@@ -262,7 +262,11 @@ async fn test_proxy(proxy: String) -> (String, bool, Duration) {
     let mut success = false;
     if parts.len() == 2 {
         let addr = format!("{}:{}", parts[0], parts[1]);
-        if let Ok(mut stream) = TcpStream::connect(&addr).await {
+        let stream_res = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await;
+        let mut stream = match stream_res {
+            Ok(Ok(s)) => s,
+            _ => return (proxy, false, start.elapsed()),
+        };
             // SOCKS4a handshake
             let mut req = Vec::new();
             req.push(0x04); // version
@@ -283,7 +287,6 @@ async fn test_proxy(proxy: String) -> (String, bool, Duration) {
                     }
                 }
             }
-        }
     }
     (proxy, success, start.elapsed())
 }
