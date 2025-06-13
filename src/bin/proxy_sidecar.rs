@@ -167,7 +167,7 @@ struct ProxyMetrics {
 fn score_metrics(m: &ProxyMetrics) -> f32 {
     let latency_norm = 1.0 - (m.latency_ms / 2000.0).min(1.0);
     let throughput_norm = (m.throughput_kbps / 10_000.0).min(1.0);
-    let score = 100.0
+    100.0
         * (0.20 * latency_norm
             + 0.20 * m.success_rate
             + 0.15 * throughput_norm
@@ -175,8 +175,7 @@ fn score_metrics(m: &ProxyMetrics) -> f32 {
             + 0.10 * (m.anonymity_level / 2.0)
             + 0.10 * m.uptime_pct
             + 0.05 * (m.proxy_type / 2.0)
-            + 0.05 * m.location_score);
-    score
+            + 0.05 * m.location_score)
 }
 
 #[derive(Parser, Debug)]
