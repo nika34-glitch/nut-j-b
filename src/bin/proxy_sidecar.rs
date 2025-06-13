@@ -92,6 +92,50 @@ const DEFAULT_FEEDS: &[&str] = &[
     "https://socks5-proxy-list.blogspot.com/feeds/posts/default",
     // ProxyDB HTTP list
     "https://proxydb.net/?protocol=http",
+    // SocksList.us API feeds
+    "https://sockslist.us/api",
+    // Spys.one HTTP/HTTPS list
+    "https://spys.one/en/http-proxy-list/",
+    // Spys.one SOCKS list
+    "https://spys.one/en/socks-proxy-list/",
+    // Spoofs.de RSS feed
+    "https://raw.githubusercontent.com/spoofs/proxy/main/list.txt",
+    // SSLProxies.org HTTPS list
+    "https://www.sslproxies.org/",
+    // UK-only proxies
+    "https://free-proxy-list.net/uk-proxy.html",
+    // US-only proxies
+    "https://www.us-proxy.org/",
+    // vakhov fresh proxy list
+    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/proxy-list.txt",
+    // WorkingProxyListTXT daily feed
+    "https://workingproxylisttxt.blogspot.com/feeds/posts/default?alt=txt",
+    // Zaeem20 free proxy list
+    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/proxy_list.txt",
+    // 89ip.cn hourly free list
+    "https://www.89ip.cn/tqdl.html",
+    // 66ip.cn daily proxies
+    "http://www.66ip.cn/mo.php?tqsl=1000",
+    // KuaiDaiLi fast proxies
+    "https://www.kuaidaili.com/free/inha/",
+    // a2u hourly list
+    "https://raw.githubusercontent.com/a2u/free-proxy-list/main/proxy_list.txt",
+    // HUYDGD AutoGetProxy
+    "https://raw.githubusercontent.com/HUYDGD/AutoGetProxy/master/all_proxies.txt",
+    // mmpx12 consolidated list
+    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/proxies.txt",
+    // ForceFledgling ProxyHub
+    "https://raw.githubusercontent.com/ForceFledgling/ProxyHub/master/proxy_list.txt",
+    // ShiftyTR proxy archives
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/proxy.txt",
+    // prxchk elite proxy list
+    "https://raw.githubusercontent.com/prxchk/Proxy-List/master/proxy-list.txt",
+    // MuRongPIG Proxy-Master
+    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/proxies.txt",
+    // proxifly free proxy list
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies.txt",
+    // gitrecon1455 fresh proxies
+    "https://raw.githubusercontent.com/gitrecon1455/fresh-proxy-list/main/proxies.txt",
 ];
 
 struct ProxyState {
