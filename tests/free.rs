@@ -108,3 +108,30 @@ async fn tcp_connect_prefers_ipv4_when_ipv6_slow() {
     let stream = ep.tcp_connect("mock.test", port).await.unwrap();
     assert!(stream.peer_addr().unwrap().is_ipv4());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_connect_handles_partial_reads() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 64];
+        let _ = socket.read(&mut buf).await; // read CONNECT request
+        socket.write_all(b"HTTP/1.1").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        socket
+            .write_all(b" 200 Connection established\r\n\r\n")
+            .await
+            .unwrap();
+    });
+
+    let mut ep = Endpoint::default();
+    ep.scheme = Scheme::Http;
+    ep.host = Ipv4Addr::LOCALHOST.to_string();
+    ep.port = port;
+    let _ = ep.tcp_connect("example.com", 80).await.unwrap();
+}

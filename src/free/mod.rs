@@ -224,9 +224,10 @@ impl Endpoint {
                 let mut stream = TcpStream::connect(addr).await?;
                 let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
                 stream.write_all(req.as_bytes()).await?;
-                let mut buf = [0u8; 16];
-                let n = stream.read(&mut buf).await?;
-                let resp = std::str::from_utf8(&buf[..n]).unwrap_or("");
+                // Read at least the HTTP status line to avoid partial reads
+                let mut buf = [0u8; 12];
+                stream.read_exact(&mut buf).await?;
+                let resp = std::str::from_utf8(&buf).unwrap_or("");
                 if resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200") {
                     Ok(stream)
                 } else {
