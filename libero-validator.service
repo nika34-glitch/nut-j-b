@@ -1,0 +1,12 @@
+[Unit]
+Description=Libero Credential Checker
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/libero_validator --proxyless --proxyless-rps 50
+Restart=always
+LimitNOFILE=100000
+
+[Install]
+WantedBy=multi-user.target
