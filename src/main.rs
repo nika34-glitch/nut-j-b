@@ -11,17 +11,9 @@
 //! - io_uring + eBPF + AF_XDP: `cargo build --release --features io_uring,ebpf,afxdp`
 //!
 //! # Libero Email Validator
-//Tool Description: Libero Email Credential Validator (LECV)
 //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
-//Key legitimate use cases include:
-//Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
-//End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
-//Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-//Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-//Important Notice:
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-//Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 
 #![allow(clippy::too_many_arguments)]
 #![cfg_attr(all(feature = "io_uring", target_os = "linux"), feature(async_closure))]
@@ -49,12 +41,12 @@ use tokio::task::JoinHandle;
 use tokio::time::interval;
 #[cfg(feature = "proxyless")]
 use tokio_rustls::{
-    rustls::{self, ClientConfig, RootCertStore},
+    rustls::{ClientConfig, RootCertStore},
     TlsConnector,
 };
 use tracing_subscriber;
 #[cfg(feature = "proxyless")]
-use webpki_roots::TLS_SERVER_ROOTS;
+use tokio_rustls::rustls::ServerName;
 
 #[cfg(feature = "proxyless")]
 mod proxyless;
@@ -130,17 +122,9 @@ fn set_nofile_limit() {}
 
 // ---------------------------------------------------------------------------
 // ENH#12 – Optional io_uring runtime wrapper.
-//Tool Description: Libero Email Credential Validator (LECV)
 //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
-//Key legitimate use cases include:
-//Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
-//End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
-//Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-//Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-//Important Notice:
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-//Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 #[cfg(all(feature = "io_uring", target_os = "linux"))]
 mod io_backend {
     pub use tokio_uring::start as backend_start;
@@ -246,17 +230,9 @@ mod ebpf_filter {
 
 // ---------------------------------------------------------------------------
 // Original tune_socket replaced with new set_socket_opts but kept for ABI.
-//Tool Description: Libero Email Credential Validator (LECV)
 //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
-//Key legitimate use cases include:
-//Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
-//End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
-//Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-//Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-//Important Notice:
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-//Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 #[inline]
 fn _tune_socket(sock: &std::net::TcpStream) {
     if let Ok(cloned) = sock.try_clone() {
@@ -407,27 +383,14 @@ async fn watch_proxies(path: String, pool: ProxyPool) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// POP3/IMAP handlers – pipelining, TLS resumption, multiplexing stubs
-//Tool Description: Libero Email Credential Validator (LECV)
-//The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
-//Key legitimate use cases include:
-//Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
-//End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
-//Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-//Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-//Important Notice:
-//LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
-//#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-//Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[cfg(feature = "proxyless")]
 static TLS_CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
-    let mut roots = RootCertStore::empty();
-    roots.extend(TLS_SERVER_ROOTS.iter().cloned());
+    let roots = RootCertStore::empty();
     Arc::new(
         ClientConfig::builder()
+            .with_safe_defaults()
             .with_root_certificates(roots)
             .with_no_client_auth(),
     )
@@ -501,17 +464,13 @@ impl POP3Handler {
             return false;
         }
         // Expect "+OK" quickly; rely on eBPF filter (#22) in kernel space.
-        //Tool Description: Libero Email Credential Validator (LECV)
         //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
         //Key legitimate use cases include:
         //Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
         //End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
         //Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-        //Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-        //Important Notice:
         //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
         //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-        //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
         &buf[..3] == b"+OK"
     }
 }
@@ -544,7 +503,7 @@ impl IMAPHandler {
             _ => return false,
         };
 
-        let domain = match rustls::pki_types::ServerName::try_from(self.host.as_str()) {
+        let domain = match ServerName::try_from(self.host.as_str()) {
             Ok(d) => d,
             Err(_) => return false,
         };
@@ -585,17 +544,9 @@ impl IMAPHandler {
 
 // ---------------------------------------------------------------------------
 // Host resolver unchanged
-//Tool Description: Libero Email Credential Validator (LECV)
 //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
-//Key legitimate use cases include:
-//Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
-//End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
-//Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-//Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-//Important Notice:
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-//Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 static MAIL_HOSTS: phf::Map<&'static str, (&'static str, &'static str)> = phf::phf_map! {
     "libero.it" => ("popmail.libero.it", "imapmail.libero.it"),
     "iol.it"    => ("popmail.libero.it", "imapmail.libero.it"),
@@ -737,7 +688,10 @@ fn create_consumer(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let opt = { rx.lock().await.recv().await };
+            let opt = {
+                let mut guard = rx.lock().await;
+                guard.recv().await
+            };
             let Some((email, pwd)) = opt else { break };
             let domain = email.split('@').nth(1).unwrap_or("");
             let mut ok = false;
@@ -980,17 +934,13 @@ struct Cli {
     #[arg(long)]
     fast_open: bool,
     /// Shards (fork processes)
-    //Tool Description: Libero Email Credential Validator (LECV)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
     //Key legitimate use cases include:
     //Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
     //End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
     //Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-    //Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-    //Important Notice:
     //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
     //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-    //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
     #[arg(long, default_value_t = 1)]
     shards: usize,
 }
@@ -1045,17 +995,9 @@ fn merge_cfg(cli: Cli) -> Config {
 }
 
 // ---------------------------------------------------------------------------
-//Tool Description: Libero Email Credential Validator (LECV)
 //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
-//Key legitimate use cases include:
-//Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
-//End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
-//Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-//Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-//Important Notice:
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-//Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 async fn run_validator(cfg: Arc<Config>) {
     let proxyless = if cfg.proxyless {
         let mgr = Arc::new(
@@ -1064,6 +1006,7 @@ async fn run_validator(cfg: Arc<Config>) {
                 Duration::from_secs(cfg.quarantine),
                 cfg.latency_weight,
                 cfg.ban_weight,
+                cfg.backend.as_deref(),
             )
             .await,
         );
@@ -1206,17 +1149,13 @@ async fn main() {
     maybe_fork(cfg.shards); // ENH#2 sharding
 
     // Unit test – preserved
-    //Tool Description: Libero Email Credential Validator (LECV)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
     //Key legitimate use cases include:
     //Enterprise Account Auditing: Organizations that use Libero Mail services internally can use LECV to verify employee credentials during security audits, SSO migration, or policy compliance checks. The tool is to be operated by authorized personnel only and within the bounds of internal security protocols.
     //End-User Credential Health Checks: LECV allows users to voluntarily submit or load their own email and password combinations (e.g., exported from password managers) to determine whether their Libero accounts are still accessible. This helps users detect outdated, compromised, or misconfigured credentials. All operations are performed locally and do not store any sensitive data.
     //Security Research & Penetration Testing: LECV may be used by certified researchers conducting credential-based testing under responsible disclosure programs or with explicit permission from the account holders or service provider. All usage must adhere to ethical hacking principles and any applicable legal frameworks.
-    //Breach Exposure Validation: In scenarios where credential dumps or breach datasets are discovered, LECV can be employed—under lawful authority—to validate which Libero credentials are still active. This aids in preparing exposure notifications, deactivating compromised accounts, or reporting incidents to relevant authorities. Use is restricted to environments with clear legal entitlement to act on the data.
-    //Important Notice:
     //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
     //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
-    //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
     if std::env::args().any(|a| a == "test") {
         let (p, i) = resolve_hosts("libero.it");
         assert_eq!(p, "popmail.libero.it");
