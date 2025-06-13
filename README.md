@@ -11,6 +11,9 @@
 #This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 #Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 
+## Output Files
+The validator writes results to `valids.txt`, `invalids.txt`, and `errors.txt` using `email:password` pairs without hashing. Keep these files secure.
+
 # Libero Email Validator
 #Tool Description: Libero Email Credential Validator (LECV)
 #The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.

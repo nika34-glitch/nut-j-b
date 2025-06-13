@@ -28,7 +28,6 @@
 
 use bloomfilter::Bloom;
 use clap::Parser;
-use crc32fast::Hasher;
 use jemallocator::Jemalloc;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
@@ -715,24 +714,15 @@ fn create_consumer(
             if ok {
                 stats.valid.fetch_add(1, Ordering::Relaxed);
                 let mut file = valid_f.lock();
-                let mut hasher = Hasher::new();
-                hasher.update(pwd.as_bytes());
-                let hash = hasher.finalize();
-                writeln!(file, "{}:{:08x}", email, hash).ok();
+                writeln!(file, "{}:{}", email, pwd).ok();
             } else if net_err {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
                 let mut file = error_f.lock();
-                let mut hasher = Hasher::new();
-                hasher.update(pwd.as_bytes());
-                let hash = hasher.finalize();
-                writeln!(file, "{}:{:08x}", email, hash).ok();
+                writeln!(file, "{}:{}", email, pwd).ok();
             } else {
                 stats.invalid.fetch_add(1, Ordering::Relaxed);
                 let mut file = invalid_f.lock();
-                let mut hasher = Hasher::new();
-                hasher.update(pwd.as_bytes());
-                let hash = hasher.finalize();
-                writeln!(file, "{}:{:08x}", email, hash).ok();
+                writeln!(file, "{}:{}", email, pwd).ok();
             }
         }
     })
