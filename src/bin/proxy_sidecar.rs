@@ -24,6 +24,46 @@ const DEFAULT_FEEDS: &[&str] = &[
     "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
     // UK Proxy specific list
     "https://raw.githubusercontent.com/proxylistuk/ukproxylist/master/uk_proxies.txt",
+    // free-proxy-list.net HTML table
+    "https://free-proxy-list.net/",
+    // CheckerProxy.net chronological lists
+    "https://raw.githubusercontent.com/checkerproxy/vps/main/proxy.txt",
+    // coderduck.com daily list
+    "https://www.coderduck.com/ports/api/proxy?key=free&https=true&format=txt",
+    // cool-proxy.net scoreboard
+    "https://cool-proxy.net/proxies.json",
+    // Elliottophellia ultimate list
+    "https://raw.githubusercontent.com/Elliottophellia/proxylist/main/proxies.txt",
+    // experte.com continuously tested list
+    "https://api.experte.com/proxylist?format=txt",
+    // floppydata scraped list
+    "https://floppydata.com/proxies.txt",
+    // fosy.club free list
+    "https://fosy.club/free-proxy-list.txt",
+    // free-proxy-list.com service
+    "https://free-proxy-list.com/",
+    // freeproxylist.cc 3 min refresh
+    "https://freeproxylist.cc/feeds/freeproxylist.txt",
+    // freeproxylists.com
+    "https://www.freeproxylists.com/api/proxylist.txt",
+    // freeproxylists.net
+    "https://www.freeproxylists.net/?format=txt",
+    // freeproxy.world
+    "https://raw.githubusercontent.com/roosterkid/freeproxylist/main/proxies.txt",
+    // freshnewproxies24 community dumps
+    "https://freshnewproxies24.top/latest.txt",
+    // proxygather.com gatherproxy
+    "http://proxygather.com/api/proxies.txt",
+    // geonode free list
+    "https://proxylist.geonode.com/api/proxy-list?limit=10000&format=txt",
+    // getproxylist free API
+    "https://api.getproxylist.com/proxy.txt",
+    // gimmeproxy rotating API
+    "https://gimmeproxy.com/api/getProxy",
+    // gologin free list
+    "https://api.gologin.com/proxylist.txt",
+    // google passed proxies
+    "https://googlepassedproxylist.blogspot.com/feeds/posts/default?alt=txt",
 ];
 
 struct ProxyState {
@@ -50,6 +90,7 @@ async fn run_cycle(state: &mut HashMap<String, ProxyState>) -> Result<()> {
         .user_agent("Mozilla/5.0")
         .build()?;
     let mut candidates = Vec::new();
+    let re = regex::Regex::new(r"(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})").unwrap();
     let mut fetches = FuturesUnordered::new();
     for &url in lists {
         let c = client.clone();
@@ -63,7 +104,9 @@ async fn run_cycle(state: &mut HashMap<String, ProxyState>) -> Result<()> {
     }
     while let Some(opt) = fetches.next().await {
         if let Some(txt) = opt {
-            candidates.extend(txt.lines().map(|l| l.trim().to_string()));
+            for cap in re.captures_iter(&txt) {
+                candidates.push(format!("{}:{}", &cap[1], &cap[2]));
+            }
         }
     }
     candidates.sort();

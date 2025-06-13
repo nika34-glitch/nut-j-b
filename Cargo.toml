@@ -85,6 +85,7 @@ bloomfilter = "3"
 crc32fast = "1.4"
 # Faster mutexes
 parking_lot = "0.12"
+regex = "1"
 # Proxyless mode helpers
 async-trait = "0.1"
 tracing = "0.1"
