@@ -1,4 +1,15 @@
 # Libero Email Validator
+
+## Proxy Feed Fetcher
+
+This repository also includes a separate crate `proxy_feed` for aggregating raw proxy lists.
+Use the `fetch` subcommand to download public proxy sources specified in a TOML configuration
+file and append them to an output list.
+
+```bash
+cargo run -p proxy_feed -- fetch --config config.toml --output feeds/all_proxies.txt
+```
+
 #Tool Description: Libero Email Credential Validator (LECV)
 #The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
 #Key legitimate use cases include:
