@@ -27,6 +27,7 @@ A simple Tkinter interface is available in `gui_frontend.py` for running the val
 ```bash
 python gui_frontend.py
 ```
+The interface parses the validator output and shows all runtime statistics such as checks per second, remaining count, success rates, and more.
 
 #Tool Description: Libero Email Credential Validator (LECV)
 #The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
