@@ -6,7 +6,9 @@ use tokio::net::TcpStream;
 use tokio::process::Command;
 
 use anyhow::Result;
+use clap::Parser;
 use futures::stream::{FuturesUnordered, StreamExt};
+use proxy_feed::{self, harvester, Config as FeedConfig};
 
 const DEFAULT_FEEDS: &[&str] = &[
     // The Big Proxy List
@@ -177,11 +179,31 @@ fn score_metrics(m: &ProxyMetrics) -> f32 {
     score
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Proxy sidecar proxy fetcher")]
+struct Cli {
+    /// Optional TOML configuration compatible with `proxy_feed`
+    #[arg(long = "feed-config")]
+    feed_config: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let cfg = match cli.feed_config.as_deref() {
+        Some(path) => match FeedConfig::from_file(path) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("failed to load feed config {}: {}", path, e);
+                None
+            }
+        },
+        None => None,
+    };
+
     let mut state: HashMap<String, ProxyState> = HashMap::new();
     loop {
-        if let Err(e) = run_cycle(&mut state).await {
+        if let Err(e) = run_cycle(&mut state, cfg.as_ref()).await {
             eprintln!("cycle error: {e}");
         }
         // Refresh every 2 minutes
@@ -189,12 +211,15 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_cycle(state: &mut HashMap<String, ProxyState>) -> Result<()> {
+async fn run_cycle(
+    state: &mut HashMap<String, ProxyState>,
+    cfg: Option<&FeedConfig>,
+) -> Result<()> {
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0")
         .build()?;
 
-    let candidates = gather_candidates(&client).await;
+    let candidates = gather_candidates(&client, cfg).await;
 
     let mut futs = FuturesUnordered::new();
     for c in candidates {
@@ -262,31 +287,32 @@ async fn test_proxy(proxy: String) -> (String, bool, Duration) {
     let mut success = false;
     if parts.len() == 2 {
         let addr = format!("{}:{}", parts[0], parts[1]);
-        let stream_res = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await;
+        let stream_res =
+            tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await;
         let mut stream = match stream_res {
             Ok(Ok(s)) => s,
             _ => return (proxy, false, start.elapsed()),
         };
-            // SOCKS4a handshake
-            let mut req = Vec::new();
-            req.push(0x04); // version
-            req.push(0x01); // CONNECT
-            let port: u16 = 110;
-            req.push((port >> 8) as u8);
-            req.push((port & 0xff) as u8);
-            req.extend(&[0, 0, 0, 1]);
-            req.push(0); // empty user id
-            req.extend(b"popmail.libero.it");
-            req.push(0);
-            if stream.write_all(&req).await.is_ok() {
-                let mut resp = [0u8; 8];
-                if stream.read_exact(&mut resp).await.is_ok() && resp[1] == 0x5a {
-                    let mut buf = [0u8; 3];
-                    if stream.read_exact(&mut buf).await.is_ok() {
-                        success = &buf == b"+OK";
-                    }
+        // SOCKS4a handshake
+        let mut req = Vec::new();
+        req.push(0x04); // version
+        req.push(0x01); // CONNECT
+        let port: u16 = 110;
+        req.push((port >> 8) as u8);
+        req.push((port & 0xff) as u8);
+        req.extend(&[0, 0, 0, 1]);
+        req.push(0); // empty user id
+        req.extend(b"popmail.libero.it");
+        req.push(0);
+        if stream.write_all(&req).await.is_ok() {
+            let mut resp = [0u8; 8];
+            if stream.read_exact(&mut resp).await.is_ok() && resp[1] == 0x5a {
+                let mut buf = [0u8; 3];
+                if stream.read_exact(&mut buf).await.is_ok() {
+                    success = &buf == b"+OK";
                 }
             }
+        }
     }
     (proxy, success, start.elapsed())
 }
@@ -330,8 +356,15 @@ async fn fetch_mtproxies(client: &reqwest::Client) -> Vec<String> {
     out
 }
 
-async fn gather_candidates(client: &reqwest::Client) -> Vec<String> {
+async fn gather_candidates(client: &reqwest::Client, cfg: Option<&FeedConfig>) -> Vec<String> {
     let mut set = HashSet::new();
+
+    // Additional feeds from proxy_feed configuration
+    if let Some(cfg) = cfg {
+        if let Ok(extra) = harvester::fetch_all(cfg).await {
+            set.extend(extra);
+        }
+    }
 
     // run otoproxy helper
     if let Ok(out) = Command::new("python")
