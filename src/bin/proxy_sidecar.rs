@@ -1,8 +1,9 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::process::Command;
 
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -150,6 +151,32 @@ struct ProxyState {
     quarantine: Option<Instant>,
 }
 
+struct ProxyMetrics {
+    latency_ms: f32,
+    success_rate: f32,
+    throughput_kbps: f32,
+    error_rate: f32,
+    anonymity_level: f32,
+    uptime_pct: f32,
+    proxy_type: f32,
+    location_score: f32,
+}
+
+fn score_metrics(m: &ProxyMetrics) -> f32 {
+    let latency_norm = 1.0 - (m.latency_ms / 2000.0).min(1.0);
+    let throughput_norm = (m.throughput_kbps / 10_000.0).min(1.0);
+    let score = 100.0
+        * (0.20 * latency_norm
+            + 0.20 * m.success_rate
+            + 0.15 * throughput_norm
+            + 0.15 * (1.0 - m.error_rate)
+            + 0.10 * (m.anonymity_level / 2.0)
+            + 0.10 * m.uptime_pct
+            + 0.05 * (m.proxy_type / 2.0)
+            + 0.05 * m.location_score);
+    score
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut state: HashMap<String, ProxyState> = HashMap::new();
@@ -157,41 +184,17 @@ async fn main() -> Result<()> {
         if let Err(e) = run_cycle(&mut state).await {
             eprintln!("cycle error: {e}");
         }
-        // Refresh every 15 minutes
-        tokio::time::sleep(Duration::from_secs(900)).await;
+        // Refresh every 2 minutes
+        tokio::time::sleep(Duration::from_secs(120)).await;
     }
 }
 
 async fn run_cycle(state: &mut HashMap<String, ProxyState>) -> Result<()> {
-    // Refresh a curated set of public proxy feeds
-    let lists = DEFAULT_FEEDS;
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0")
         .build()?;
-    let mut candidates = Vec::new();
-    // Fetch additional proxies from mtpro.xyz JSON API
-    candidates.extend(fetch_mtproxies(&client).await);
-    let re = regex::Regex::new(r"(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})").unwrap();
-    let mut fetches = FuturesUnordered::new();
-    for &url in lists {
-        let c = client.clone();
-        fetches.push(async move {
-            if let Ok(resp) = c.get(url).send().await {
-                resp.text().await.ok()
-            } else {
-                None
-            }
-        });
-    }
-    while let Some(opt) = fetches.next().await {
-        if let Some(txt) = opt {
-            for cap in re.captures_iter(&txt) {
-                candidates.push(format!("{}:{}", &cap[1], &cap[2]));
-            }
-        }
-    }
-    candidates.sort();
-    candidates.dedup();
+
+    let candidates = gather_candidates(&client).await;
 
     let mut futs = FuturesUnordered::new();
     for c in candidates {
@@ -227,9 +230,18 @@ async fn run_cycle(state: &mut HashMap<String, ProxyState>) -> Result<()> {
             ent.quarantine = Some(Instant::now() + Duration::from_secs(1800));
             continue;
         }
-        let latency_score = (1.0 - (ent.avg_latency * 1000.0 / 1000.0).min(1.0)).max(0.0);
-        let score = ent.ewma * 0.7 + latency_score * 0.3;
-        if score > 0.7 {
+        let metrics = ProxyMetrics {
+            latency_ms: ent.avg_latency * 1000.0,
+            success_rate: ent.ewma,
+            throughput_kbps: 0.0,
+            error_rate: 1.0 - ent.ewma,
+            anonymity_level: 1.0,
+            uptime_pct: 1.0,
+            proxy_type: 1.0,
+            location_score: 0.5,
+        };
+        let score = score_metrics(&metrics) / 100.0;
+        if score >= 0.75 {
             good.push(proxy);
         }
     }
@@ -313,4 +325,56 @@ async fn fetch_mtproxies(client: &reqwest::Client) -> Vec<String> {
         }
     }
     out
+}
+
+async fn gather_candidates(client: &reqwest::Client) -> Vec<String> {
+    let mut set = HashSet::new();
+
+    // run otoproxy helper
+    if let Ok(out) = Command::new("python")
+        .arg("otoproxy/otoproxy.py")
+        .output()
+        .await
+    {
+        if out.status.success() {
+            if let Ok(text) = tokio::fs::read_to_string("feeds/all-proxies.txt").await {
+                for line in text.lines() {
+                    let l = line.trim();
+                    if !l.is_empty() {
+                        set.insert(l.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // built-in feed list
+    let re = regex::Regex::new(r"(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})").unwrap();
+    let mut fetches = FuturesUnordered::new();
+    for &url in DEFAULT_FEEDS {
+        let c = client.clone();
+        fetches.push(async move {
+            if let Ok(resp) = c.get(url).send().await {
+                resp.text().await.ok()
+            } else {
+                None
+            }
+        });
+    }
+    while let Some(opt) = fetches.next().await {
+        if let Some(txt) = opt {
+            for cap in re.captures_iter(&txt) {
+                set.insert(format!("{}:{}", &cap[1], &cap[2]));
+            }
+        }
+    }
+
+    // mtpro.xyz API
+    for p in fetch_mtproxies(client).await {
+        set.insert(p);
+    }
+
+    let mut v: Vec<_> = set.into_iter().collect();
+    v.sort();
+    v
 }

@@ -39,24 +39,24 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
-#[cfg(feature = "proxyless")]
+#[cfg(feature = "free")]
 use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore},
     TlsConnector,
 };
 use tracing_subscriber;
-#[cfg(feature = "proxyless")]
+#[cfg(feature = "free")]
 use tokio_rustls::rustls::ServerName;
 
-#[cfg(feature = "proxyless")]
-mod proxyless;
-#[cfg(not(feature = "proxyless"))]
-mod proxyless {
+#[cfg(feature = "free")]
+mod free;
+#[cfg(not(feature = "free"))]
+mod free {
     use std::time::Duration;
     #[derive(Clone)]
-    pub struct ProxylessManager;
+    pub struct FreeManager;
     pub const MAX_RPS: u16 = 15;
-    impl ProxylessManager {
+    impl FreeManager {
         pub async fn detect(_rps: u16, _q: Duration, _lw: f32, _bw: f32) -> Self {
             Self
         }
@@ -385,7 +385,7 @@ async fn watch_proxies(path: String, pool: ProxyPool) {
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[cfg(feature = "proxyless")]
+#[cfg(feature = "free")]
 static TLS_CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
     let roots = RootCertStore::empty();
     Arc::new(
@@ -495,7 +495,7 @@ impl IMAPHandler {
         }
     }
 
-    #[cfg(feature = "proxyless")]
+    #[cfg(feature = "free")]
     async fn login(&self, user: &str, pwd: &str) -> bool {
         let addr = format!("{}:{}", self.host, self.port);
         let tcp = match tokio::time::timeout(self.timeout, TcpStream::connect(&addr)).await {
@@ -535,7 +535,7 @@ impl IMAPHandler {
         resp.contains(&format!("{tag} OK"))
     }
 
-    #[cfg(not(feature = "proxyless"))]
+    #[cfg(not(feature = "free"))]
     async fn login(&self, _user: &str, _pwd: &str) -> bool {
         let _ = self;
         false
@@ -681,7 +681,7 @@ fn create_consumer(
     stats: Arc<Stats>,
     cfg: Arc<Config>,
     proxies: ProxyPool,
-    proxyless: Option<Arc<proxyless::ProxylessManager>>,
+    free: Option<Arc<free::FreeManager>>,
     valid_f: Arc<Mutex<BufWriter<File>>>,
     invalid_f: Arc<Mutex<BufWriter<File>>>,
     error_f: Arc<Mutex<BufWriter<File>>>,
@@ -699,7 +699,7 @@ fn create_consumer(
             let matrix = cfg.matrix(domain);
 
             for retry in 0..=cfg.max_retries {
-                if let Some(pm) = &proxyless {
+                if let Some(pm) = &free {
                     for item in &matrix {
                         if let MatrixItem::Pop { host, port, .. } = item {
                             for _ in 0..pm.len() {
@@ -828,7 +828,7 @@ struct Config {
     full: bool,
     refresh: f64,
     shards: usize,
-    proxyless: bool,
+    free: bool,
     backend: Option<String>,
     rps: u16,
     quarantine: u64,
@@ -914,21 +914,21 @@ struct Cli {
     /// Dashboard refresh rate seconds (min 0.016)
     #[arg(long)]
     refresh: Option<f64>,
-    /// Use proxyless backends
+    /// Use free backends
     #[arg(long)]
-    proxyless: bool,
-    /// Force a specific proxyless backend
-    #[arg(long = "proxyless-backend")]
+    free: bool,
+    /// Force a specific free backend
+    #[arg(long = "free-backend")]
     backend: Option<String>,
-    /// Override proxyless RPS
-    #[arg(long = "proxyless-rps")]
+    /// Override free RPS
+    #[arg(long = "free-rps")]
     rps: Option<u16>,
     /// Quarantine TTL seconds
-    #[arg(long = "proxyless-quarantine")]
+    #[arg(long = "free-quarantine")]
     quarantine: Option<u64>,
-    #[arg(long = "proxyless-latency-weight", default_value_t = 1.0)]
+    #[arg(long = "free-latency-weight", default_value_t = 1.0)]
     latency_weight: f32,
-    #[arg(long = "proxyless-ban-weight", default_value_t = 1.5)]
+    #[arg(long = "free-ban-weight", default_value_t = 1.5)]
     ban_weight: f32,
     /// Enable TCP Fast Open
     #[arg(long)]
@@ -961,9 +961,9 @@ fn merge_cfg(cli: Cli) -> Config {
         full: false,
         refresh: 0.016,
         shards: cli.shards,
-        proxyless: cli.proxyless,
+        free: cli.free,
         backend: cli.backend.clone(),
-        rps: cli.rps.unwrap_or(crate::proxyless::MAX_RPS),
+        rps: cli.rps.unwrap_or(crate::free::MAX_RPS),
         quarantine: cli.quarantine.unwrap_or(900),
         latency_weight: cli.latency_weight,
         ban_weight: cli.ban_weight,
@@ -988,7 +988,7 @@ fn merge_cfg(cli: Cli) -> Config {
     if let Some(rf) = cli.refresh {
         cfg.refresh = rf.max(0.016);
     }
-    if cfg.proxyless && cli.shards == 1 {
+    if cfg.free && cli.shards == 1 {
         cfg.shards = 3;
     }
     cfg
@@ -999,9 +999,9 @@ fn merge_cfg(cli: Cli) -> Config {
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 async fn run_validator(cfg: Arc<Config>) {
-    let proxyless = if cfg.proxyless {
+    let free = if cfg.free {
         let mgr = Arc::new(
-            proxyless::ProxylessManager::detect(
+            free::FreeManager::detect(
                 cfg.rps,
                 Duration::from_secs(cfg.quarantine),
                 cfg.latency_weight,
@@ -1036,7 +1036,7 @@ async fn run_validator(cfg: Arc<Config>) {
     } else {
         None
     };
-    let proxies = if cfg.proxyless {
+    let proxies = if cfg.free {
         ProxyPool::new(vec!["127.0.0.1:0".to_string()])
     } else {
         let p = load_proxies(&cfg.proxy_file);
@@ -1085,7 +1085,7 @@ async fn run_validator(cfg: Arc<Config>) {
             stats.clone(),
             cfg.clone(),
             proxies.clone(),
-            proxyless.clone(),
+            free.clone(),
             valid_f.clone(),
             invalid_f.clone(),
             error_f.clone(),

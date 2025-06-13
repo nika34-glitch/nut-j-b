@@ -1,7 +1,7 @@
-#![cfg(feature = "proxyless")]
+#![cfg(feature = "free")]
 
-use libero_validator::proxyless::ProxylessManager;
-use libero_validator::proxyless::{
+use libero_validator::free::FreeManager;
+use libero_validator::free::{
     clear_connect_delay, clear_mock_dns, mock_connect_delay, mock_dns, Endpoint, Scheme,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -9,13 +9,13 @@ use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn manager_detects_backends() {
-    let mgr = ProxylessManager::detect(5, Duration::from_secs(60), 1.0, 1.5, None).await;
+    let mgr = FreeManager::detect(5, Duration::from_secs(60), 1.0, 1.5, None).await;
     assert!(mgr.len() > 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn manager_filters_backend() {
-    let mgr = ProxylessManager::detect(5, Duration::from_secs(60), 1.0, 1.5, Some("DenoDeploy")).await;
+    let mgr = FreeManager::detect(5, Duration::from_secs(60), 1.0, 1.5, Some("DenoDeploy")).await;
     assert_eq!(mgr.len(), 1);
     assert_eq!(mgr.attempts()[0].0, "DenoDeploy");
 }
