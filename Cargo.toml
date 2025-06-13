@@ -82,6 +82,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 anyhow = "1"
 # Memory mapped input
 memmap2 = "0.5"
+proxy_feed = { path = "./proxy_feed" }
 
 [profile.release]
 codegen-units = 1
