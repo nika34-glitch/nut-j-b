@@ -8,6 +8,12 @@ path = "src/main.rs"
 test = false
 doctest = false
 
+[[bin]]
+name = "proxy_sidecar"
+path = "src/bin/proxy_sidecar.rs"
+test = false
+doctest = false
+
 # Cargo.toml
 # Libero Email Validator
 #Tool Description: Libero Email Credential Validator (LECV)
@@ -88,6 +94,7 @@ prometheus = { version = "0.13", optional = true }
 tokio-rustls = { version = "0.24", optional = true }
 trust-dns-resolver = { version = "0.23", default-features = false, features = ["tokio-runtime", "dns-over-https-rustls"], optional = true }
 tokio-tungstenite = { version = "0.26", optional = true, features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 anyhow = "1"
 # Memory mapped input
 # Libero Email Validator

