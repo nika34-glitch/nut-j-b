@@ -81,7 +81,7 @@ async fn doh_resolver() -> Arc<TokioAsyncResolver> {
     .clone()
 }
 
-/// Scheme used by a proxyless endpoint
+/// Scheme used by a free endpoint
 #[derive(Clone, Copy)]
 pub enum Scheme {
     Http,
@@ -277,28 +277,28 @@ pub struct Controller;
 pub const MAX_RPS: u16 = 15;
 
 static LATENCY: Lazy<GaugeVec> = Lazy::new(|| {
-    register_gauge_vec!("libero_proxyless_latency_seconds", "latency", &["backend"]).unwrap()
+    register_gauge_vec!("libero_free_latency_seconds", "latency", &["backend"]).unwrap()
 });
 static ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "libero_proxyless_errors_total",
+        "libero_free_errors_total",
         "errors",
         &["backend", "kind"]
     )
     .unwrap()
 });
 static BAN_SCORE: Lazy<GaugeVec> = Lazy::new(|| {
-    register_gauge_vec!("libero_proxyless_ban_score", "ban score", &["backend"]).unwrap()
+    register_gauge_vec!("libero_free_ban_score", "ban score", &["backend"]).unwrap()
 });
 static ACTIVE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!("libero_proxyless_active", "active", &["backend"]).unwrap()
+    register_int_gauge_vec!("libero_free_active", "active", &["backend"]).unwrap()
 });
 static SUCCESS: Lazy<GaugeVec> = Lazy::new(|| {
-    register_gauge_vec!("libero_proxyless_success", "success rate", &["backend"]).unwrap()
+    register_gauge_vec!("libero_free_success", "success rate", &["backend"]).unwrap()
 });
 
 #[async_trait]
-pub trait ProxylessBackend: Send + Sync + 'static {
+pub trait FreeBackend: Send + Sync + 'static {
     async fn bootstrap(&self, _ctl: &Controller) -> anyhow::Result<Endpoint>;
     async fn connect(&self, ep: &Endpoint, host: &str, port: u16) -> anyhow::Result<PooledStream>;
     async fn ping(&self) -> Health;
@@ -311,7 +311,7 @@ macro_rules! simple_backend {
         #[derive(Default)]
         pub struct $name;
         #[async_trait]
-        impl ProxylessBackend for $name {
+        impl FreeBackend for $name {
             async fn bootstrap(&self, _ctl: &Controller) -> anyhow::Result<Endpoint> {
                 Ok(Endpoint::default())
             }
@@ -408,7 +408,7 @@ impl TokenBucket {
 }
 
 struct BackendState {
-    backend: Arc<dyn ProxylessBackend>,
+    backend: Arc<dyn FreeBackend>,
     endpoint: Endpoint,
     bucket: Mutex<TokenBucket>,
     attempts: Mutex<u32>,
@@ -420,7 +420,7 @@ struct BackendState {
     idx: usize,
 }
 
-pub struct ProxylessManager {
+pub struct FreeManager {
     backends: Vec<Arc<BackendState>>,
     max_rps: u16,
     base_quarantine: Duration,
@@ -430,7 +430,7 @@ pub struct ProxylessManager {
     batch_left: AtomicU8,
 }
 
-impl ProxylessManager {
+impl FreeManager {
     pub async fn detect(
         max_rps: u16,
         quarantine: Duration,
@@ -438,7 +438,7 @@ impl ProxylessManager {
         ban_weight: f32,
         backend: Option<&str>,
     ) -> Self {
-        let mut list: Vec<Arc<dyn ProxylessBackend>> = vec![
+        let mut list: Vec<Arc<dyn FreeBackend>> = vec![
             Arc::new(DenoDeploy::default()),
             Arc::new(RunKit::default()),
             Arc::new(FastlyCompute::default()),
@@ -475,7 +475,7 @@ impl ProxylessManager {
             Arc::new(OpenRestyPlay::default()),
             Arc::new(TryCF::default()),
         ];
-        let backends: Vec<Arc<dyn ProxylessBackend>> = if let Some(name) = backend {
+        let backends: Vec<Arc<dyn FreeBackend>> = if let Some(name) = backend {
             list.into_iter().filter(|b| b.name() == name).collect()
         } else {
             list

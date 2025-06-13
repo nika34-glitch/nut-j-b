@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/libero_validator --proxyless --proxyless-rps 50
+ExecStart=/usr/local/bin/libero_validator --free --free-rps 50
 Restart=always
 LimitNOFILE=100000
 
