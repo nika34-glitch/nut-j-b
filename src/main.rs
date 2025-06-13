@@ -47,7 +47,14 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
+#[cfg(feature = "proxyless")]
+use tokio_rustls::{
+    rustls::{self, ClientConfig, RootCertStore},
+    TlsConnector,
+};
 use tracing_subscriber;
+#[cfg(feature = "proxyless")]
+use webpki_roots::TLS_SERVER_ROOTS;
 
 #[cfg(feature = "proxyless")]
 mod proxyless;
@@ -107,9 +114,12 @@ fn enable_tcp_tw_reuse() {}
 
 #[cfg(unix)]
 fn set_nofile_limit() {
-    use libc::{rlimit, RLIMIT_NOFILE, setrlimit};
+    use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
     unsafe {
-        let lim = rlimit { rlim_cur: 100000, rlim_max: 100000 };
+        let lim = rlimit {
+            rlim_cur: 100000,
+            rlim_max: 100000,
+        };
         if setrlimit(RLIMIT_NOFILE, &lim) != 0 {
             eprintln!("setrlimit failed: {}", std::io::Error::last_os_error());
         }
@@ -369,9 +379,9 @@ fn load_proxies(path: &str) -> ProxyPool {
 }
 
 async fn watch_proxies(path: String, pool: ProxyPool) {
+    use std::time::SystemTime;
     use tokio::fs;
     use tokio::time::sleep;
-    use std::time::SystemTime;
 
     let mut last: Option<SystemTime> = None;
     loop {
@@ -411,6 +421,17 @@ async fn watch_proxies(path: String, pool: ProxyPool) {
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[cfg(feature = "proxyless")]
+static TLS_CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
+    let mut roots = RootCertStore::empty();
+    roots.extend(TLS_SERVER_ROOTS.iter().cloned());
+    Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
+});
 
 #[allow(dead_code)]
 struct POP3Handler {
@@ -515,8 +536,49 @@ impl IMAPHandler {
         }
     }
 
+    #[cfg(feature = "proxyless")]
+    async fn login(&self, user: &str, pwd: &str) -> bool {
+        let addr = format!("{}:{}", self.host, self.port);
+        let tcp = match tokio::time::timeout(self.timeout, TcpStream::connect(&addr)).await {
+            Ok(Ok(s)) => s,
+            _ => return false,
+        };
+
+        let domain = match rustls::pki_types::ServerName::try_from(self.host.as_str()) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+
+        let connector = TlsConnector::from(TLS_CONFIG.clone());
+        let mut stream = match connector.connect(domain, tcp).await {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        let tag = "A1";
+        let login = format!("{tag} LOGIN {} {}\r\n", user, pwd);
+        if stream.write_all(login.as_bytes()).await.is_err() {
+            return false;
+        }
+        let logout = format!("{tag} LOGOUT\r\n");
+        if stream.write_all(logout.as_bytes()).await.is_err() {
+            return false;
+        }
+
+        let mut buf = Vec::new();
+        if tokio::time::timeout(self.timeout, stream.read_to_end(&mut buf))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        let resp = String::from_utf8_lossy(&buf);
+        resp.contains(&format!("{tag} OK"))
+    }
+
+    #[cfg(not(feature = "proxyless"))]
     async fn login(&self, _user: &str, _pwd: &str) -> bool {
-        // TODO: implement with TLS session resumption (ENH#7)
+        let _ = self;
         false
     }
 }
@@ -1038,7 +1100,9 @@ async fn run_validator(cfg: Arc<Config>) {
         println!("Loaded {} proxies", p.size());
         let watch_pool = p.clone();
         let path = cfg.proxy_file.clone();
-        tokio::spawn(async move { watch_proxies(path, watch_pool).await; });
+        tokio::spawn(async move {
+            watch_proxies(path, watch_pool).await;
+        });
         p
     };
 
