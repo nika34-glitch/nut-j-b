@@ -1,8 +1,8 @@
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use serde::Deserialize;
 
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -137,6 +137,11 @@ const DEFAULT_FEEDS: &[&str] = &[
     "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies.txt",
     // gitrecon1455 fresh proxies
     "https://raw.githubusercontent.com/gitrecon1455/fresh-proxy-list/main/proxies.txt",
+    // VMHeaven continuously updated lists
+    "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/http.txt",
+    "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/https.txt",
+    "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks4.txt",
+    "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt",
 ];
 
 struct ProxyState {
@@ -152,7 +157,8 @@ async fn main() -> Result<()> {
         if let Err(e) = run_cycle(&mut state).await {
             eprintln!("cycle error: {e}");
         }
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        // Refresh every 15 minutes
+        tokio::time::sleep(Duration::from_secs(900)).await;
     }
 }
 
@@ -293,7 +299,11 @@ async fn fetch_mtproxies(client: &reqwest::Client) -> Vec<String> {
             }
         }
     }
-    if let Ok(resp) = client.get("https://mtpro.xyz/api/?type=mtproto").send().await {
+    if let Ok(resp) = client
+        .get("https://mtpro.xyz/api/?type=mtproto")
+        .send()
+        .await
+    {
         if let Ok(body) = resp.text().await {
             if let Ok(list) = serde_json::from_str::<Vec<MtProtoProxy>>(&body) {
                 for p in list {
