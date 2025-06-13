@@ -1,0 +1,74 @@
+name: Update subscriptions ♥ sevcator.t.me
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  update-subscriptions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install dependencies and run script
+        run: |
+          cd working
+          npm install axios atob btoa
+          node index.js
+          rm -rf node_modules
+
+      - name: Organize files
+        run: |
+          mkdir -p full protocols mini
+          mv working/5ubscrpt10n.txt full/
+          mv working/5ubscrpt10n-b64.txt full/
+          mv working/vm.txt protocols/
+          mv working/vl.txt protocols/
+          mv working/ss.txt protocols/
+          mv working/tr.txt protocols/
+          mv working/m1n1-5ub-*.txt mini/
+
+          MINI_SUBS=$(ls mini/m1n1-5ub-*.txt | sort -V | awk '{print "https://raw.githubusercontent.com/${{ github.repository }}/main/"$0}')
+
+          cat <<EOF > README.md
+          \`\`\`
+          ** The Subscriptions updating every hour **
+          ** Found a new source to obtain subscriptions? Tell it in Repository Issues **
+          
+          ** You need a software that supports these protocols and has a Subscription function **
+          ** Just copy the needed link and paste it into the program **
+          
+          ** Some software/hardware might not import these subscriptions because they are too large **
+
+          ** Full Subscription (VLESS/VMESS/Shadowsocks/Trojan) **
+          https://raw.githubusercontent.com/${{ github.repository }}/main/full/5ubscrpt10n.txt
+          
+          ** Full Subscription ~ Base64 ~ (VLESS/VMESS/Shadowsocks/Trojan) **
+          https://raw.githubusercontent.com/${{ github.repository }}/main/full/5ubscrpt10n-b64.txt
+          
+          ** Subscriptions by protocols **
+          [VLESS]
+          https://raw.githubusercontent.com/${{ github.repository }}/main/protocols/vl.txt
+          [VMESS]
+          https://raw.githubusercontent.com/${{ github.repository }}/main/protocols/vm.txt
+          [TROJAN]
+          https://raw.githubusercontent.com/${{ github.repository }}/main/protocols/tr.txt
+          [SHADOWSOCKS]
+          https://raw.githubusercontent.com/${{ github.repository }}/main/protocols/ss.txt
+          
+          ** Subscriptions in parts (10k lines per file) **
+          $MINI_SUBS
+          \`\`\`
+          EOF
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add .
+          git commit -m "⚡ $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
