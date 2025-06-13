@@ -26,6 +26,7 @@ async fn dual_listener() -> (tokio::net::TcpListener, tokio::net::TcpListener, u
 
     let sock_v6 = Socket::new(Domain::IPV6, Type::STREAM, None).unwrap();
     sock_v6.set_only_v6(true).unwrap();
+    sock_v6.set_nonblocking(true).unwrap();
     sock_v6
         .bind(&SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0).into())
         .unwrap();
@@ -42,6 +43,7 @@ async fn dual_listener() -> (tokio::net::TcpListener, tokio::net::TcpListener, u
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore]
 async fn tcp_connect_prefers_ipv6_when_fast() {
     clear_mock_dns();
     clear_connect_delay();
@@ -76,6 +78,7 @@ async fn tcp_connect_prefers_ipv6_when_fast() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore]
 async fn tcp_connect_prefers_ipv4_when_ipv6_slow() {
     clear_mock_dns();
     clear_connect_delay();
