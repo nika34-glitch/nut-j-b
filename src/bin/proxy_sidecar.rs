@@ -62,8 +62,6 @@ const DEFAULT_FEEDS: &[&str] = &[
     "https://proxylist.geonode.com/api/proxy-list?limit=10000&format=txt",
     // getproxylist free API
     "https://api.getproxylist.com/proxy.txt",
-    // gimmeproxy rotating API
-    "https://gimmeproxy.com/api/getProxy",
     // gologin free list
     "https://api.gologin.com/proxylist.txt",
     // google passed proxies
@@ -328,6 +326,30 @@ struct MtProtoProxy {
     port: u16,
 }
 
+#[derive(Deserialize)]
+struct GimmeProxyResp {
+    ip: String,
+    port: u16,
+}
+
+async fn fetch_gimmeproxy(client: &reqwest::Client, count: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for _ in 0..count {
+        if let Ok(resp) = client
+            .get("https://gimmeproxy.com/api/getProxy")
+            .send()
+            .await
+        {
+            if let Ok(body) = resp.text().await {
+                if let Ok(item) = serde_json::from_str::<GimmeProxyResp>(&body) {
+                    out.push(format!("{}:{}", item.ip, item.port));
+                }
+            }
+        }
+    }
+    out
+}
+
 async fn fetch_mtproxies(client: &reqwest::Client) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(resp) = client.get("https://mtpro.xyz/api/?type=socks").send().await {
@@ -402,6 +424,11 @@ async fn gather_candidates(client: &reqwest::Client, cfg: Option<&FeedConfig>) -
                 set.insert(format!("{}:{}", &cap[1], &cap[2]));
             }
         }
+    }
+
+    // gimmeproxy.com API
+    for p in fetch_gimmeproxy(client, 20).await {
+        set.insert(p);
     }
 
     // mtpro.xyz API
