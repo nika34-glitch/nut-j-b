@@ -10,8 +10,8 @@
 - The sidecar refreshes feeds every **15 minutes** and writes proxies with a score above `0.7` to `proxies.txt`. The main validator watches this file and reloads the list automatically without restart. The feeds now include the continuously updated lists from [VMHeaven Free Proxy List](https://github.com/vmheaven/VMHeaven-Free-Proxy-Updated).
 
 ## Building
-Run the following to compile all binaries with proxyless support:
+Run the following to compile all binaries with free support:
 
 ```bash
-RUSTFLAGS='-C target-cpu=native' cargo build --release --features proxyless
+RUSTFLAGS='-C target-cpu=native' cargo build --release --features free
 ```
