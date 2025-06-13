@@ -23,7 +23,8 @@ python otoproxy/otoproxy.py
 
 ### GUI Front-end
 
-A simple Tkinter interface is available in `gui_frontend.py` for running the validator or any command-line analysis. Launch it with:
+`gui_frontend.py` provides a lightweight Tkinter interface for running the validator or any command-line tool.  It now uses themed widgets and a scrolling output window for a cleaner look.
+Launch it with:
 ```bash
 python gui_frontend.py
 ```

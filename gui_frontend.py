@@ -1,40 +1,58 @@
-"""
-Simple Tkinter front-end for running the validator or any CLI.
-"""
-import tkinter as tk
-from tkinter import filedialog, messagebox
+"""Minimal Tkinter GUI for running the validator or any command line tool."""
+
 import subprocess
 import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+
+BG_COLOR = "#f0f0f0"
 
 class CLIFrontend(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Analysis Tool GUI")
-        self.geometry("600x400")
+        self.title("Libero Validator")
+        self.geometry("650x420")
+        self.configure(bg=BG_COLOR)
+
+        style = ttk.Style(self)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure("TButton", padding=5)
+
         self.cmd_var = tk.StringVar(value="./libero_validator")
         self.args_var = tk.StringVar()
-        self.output = tk.Text(self, state='disabled', wrap='word')
-        self.create_widgets()
         self.process = None
 
+        self.create_widgets()
+
     def create_widgets(self):
-        frame = tk.Frame(self)
-        frame.pack(fill='x', padx=5, pady=5)
-        tk.Label(frame, text="Command:").pack(side='left')
-        tk.Entry(frame, textvariable=self.cmd_var, width=40).pack(side='left', fill='x', expand=True)
-        tk.Button(frame, text="Browse", command=self.browse_cmd).pack(side='left', padx=5)
+        frame = ttk.Frame(self)
+        frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
 
-        args_frame = tk.Frame(self)
-        args_frame.pack(fill='x', padx=5)
-        tk.Label(args_frame, text="Arguments:").pack(side='left')
-        tk.Entry(args_frame, textvariable=self.args_var, width=40).pack(side='left', fill='x', expand=True)
+        ttk.Label(frame, text="Command:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.cmd_var, width=45).grid(row=0, column=1, sticky="ew")
+        ttk.Button(frame, text="Browse", command=self.browse_cmd).grid(row=0, column=2, padx=5)
+        frame.columnconfigure(1, weight=1)
 
-        btn_frame = tk.Frame(self)
-        btn_frame.pack(fill='x', padx=5, pady=5)
-        tk.Button(btn_frame, text="Run", command=self.run_cmd).pack(side='left')
-        tk.Button(btn_frame, text="Stop", command=self.stop_cmd).pack(side='left', padx=5)
+        args_frame = ttk.Frame(self)
+        args_frame.grid(row=1, column=0, sticky="ew", padx=10)
+        ttk.Label(args_frame, text="Arguments:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(args_frame, textvariable=self.args_var, width=45).grid(row=0, column=1, sticky="ew")
+        args_frame.columnconfigure(1, weight=1)
 
-        self.output.pack(fill='both', expand=True, padx=5, pady=5)
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=2, column=0, sticky="w", padx=10, pady=5)
+        ttk.Button(btn_frame, text="Run", command=self.run_cmd).pack(side="left")
+        ttk.Button(btn_frame, text="Stop", command=self.stop_cmd).pack(side="left", padx=5)
+
+        self.output = scrolledtext.ScrolledText(
+            self, state="disabled", wrap="word", height=15
+        )
+        self.output.grid(row=3, column=0, sticky="nsew", padx=10, pady=5)
+
+        self.grid_rowconfigure(3, weight=1)
+        self.grid_columnconfigure(0, weight=1)
 
     def browse_cmd(self):
         path = filedialog.askopenfilename(title="Select executable")
