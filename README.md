@@ -42,5 +42,5 @@ The interface parses the validator output and shows all runtime statistics such 
 #Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
 
 ## Output Files
-The validator writes results to `valids.txt`, `invalids.txt`, and `errors.txt` using `email:password` pairs without hashing. Keep these files secure.
+The validator writes results to `valid.txt`, `invalid.txt`, and `error.txt` using `email:password` pairs without hashing. Keep these files secure.
 

@@ -394,7 +394,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[cfg(feature = "free")]
 static TLS_CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
-    let roots = RootCertStore::empty();
+    use tokio_rustls::rustls::client::danger::TlsServerTrustAnchors;
+    use tokio_rustls::rustls::OwnedTrustAnchor;
+    let mut roots = RootCertStore::empty();
+    roots.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(|ta| {
+        OwnedTrustAnchor::from_subject_spki_name_constraints(
+            ta.subject,
+            ta.spki,
+            ta.name_constraints,
+        )
+    }));
     Arc::new(
         ClientConfig::builder()
             .with_safe_defaults()
@@ -797,7 +806,6 @@ fn create_consumer(
                                     .await
                                 {
                                     ok = true;
-                                    net_err = false;
                                     break;
                                 }
                             }
@@ -856,7 +864,7 @@ fn create_consumer(
                 }
                 stats.retries.fetch_add(1, Ordering::Relaxed);
                 let exp = cfg.backoff_base * (2.0_f64).powi(retry as i32);
-                let jitter = rand::thread_rng().gen_range(0.0..exp);
+                let jitter = rand::rng().random_range(0.0..exp);
                 tokio::time::sleep(Duration::from_secs_f64(jitter)).await;
             }
 

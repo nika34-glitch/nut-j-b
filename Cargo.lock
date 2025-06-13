@@ -1755,6 +1755,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trust-dns-resolver",
+ "webpki-roots 0.26.11",
  "wiremock",
 ]
 
