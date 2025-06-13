@@ -103,15 +103,37 @@ class CLIFrontend(tk.Tk):
         if not line.startswith("tot:"):
             return
         parts = {}
+        bar = ""
         for item in line.strip().split():
+            if item.startswith("[") and item.endswith("]"):
+                bar = item
+                continue
             if ":" in item:
                 k, v = item.split(":", 1)
                 parts[k] = v
+
         try:
             self.stats_var.set(
-                f"Checked {parts.get('chk','?')}/{parts.get('tot','?')} "
-                f"Valid {parts.get('ok','?')} Invalid {parts.get('bad','?')} "
-                f"Errors {parts.get('err','?')} Progress {parts.get('prog','?')}%"
+                " ".join([
+                    f"Total {parts.get('tot','?')}",
+                    f"Checked {parts.get('chk','?')}",
+                    f"Valid {parts.get('ok','?')}",
+                    f"Invalid {parts.get('bad','?')}",
+                    f"Errors {parts.get('err','?')}",
+                    f"Retries {parts.get('ret','?')}",
+                    f"Remaining {parts.get('rem','?')}",
+                    f"CPS {parts.get('cps','?')}",
+                    f"CPM {parts.get('cpm','?')}",
+                    f"Valid% {parts.get('ok%','?')}",
+                    f"Invalid% {parts.get('bad%','?')}",
+                    f"Error% {parts.get('err%','?')}",
+                    f"Prog {parts.get('prog','?')}%",
+                    bar,
+                    f"ETA {parts.get('eta','?')}",
+                    f"Run {parts.get('run','?')}",
+                    f"Conc {parts.get('conc','?')}",
+                    f"Proxies {parts.get('prx','?')}",
+                ])
             )
         except Exception:
             pass
