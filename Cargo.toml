@@ -80,6 +80,9 @@ trust-dns-resolver = { version = "0.23", default-features = false, features = ["
 tokio-tungstenite = { version = "0.26", optional = true, features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 anyhow = "1"
+# Terminal UI
+ratatui = "0.26"
+crossterm = "0.27"
 # Memory mapped input
 memmap2 = "0.5"
 proxy_feed = { path = "./proxy_feed" }

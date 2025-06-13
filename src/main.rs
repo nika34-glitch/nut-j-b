@@ -657,6 +657,81 @@ fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) 
     );
 }
 
+fn dashboard(stats: Arc<Stats>, _start: Instant) -> anyhow::Result<()> {
+    use crossterm::{
+        event, execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    };
+    use ratatui::{
+        prelude::*,
+        widgets::{Block, Borders, Gauge, Paragraph},
+    };
+    let mut stdout = std::io::stdout();
+    enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = ratatui::prelude::CrosstermBackend::new(stdout);
+    let mut terminal = ratatui::Terminal::new(backend)?;
+    loop {
+        terminal.draw(|f| {
+            let size = f.size();
+            let total = stats.total.load(Ordering::Relaxed);
+            let checked = stats.checked.load(Ordering::Relaxed);
+            let valid = stats.valid.load(Ordering::Relaxed);
+            let invalid = stats.invalid.load(Ordering::Relaxed);
+            let errors = stats.errors.load(Ordering::Relaxed);
+            let progress = if total > 0 {
+                checked as f64 / total as f64
+            } else {
+                0.0
+            };
+            let gauge = Gauge::default()
+                .block(Block::default().title("Progress").borders(Borders::ALL))
+                .gauge_style(Style::default().fg(Color::Green))
+                .ratio(progress);
+            let text = Paragraph::new(format!(
+                "chk:{} ok:{} bad:{} err:{} rem:{}",
+                checked,
+                valid,
+                invalid,
+                errors,
+                total.saturating_sub(checked)
+            ))
+            .block(Block::default().borders(Borders::ALL));
+            f.render_widget(
+                gauge,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: size.width,
+                    height: 3,
+                },
+            );
+            f.render_widget(
+                text,
+                Rect {
+                    x: 0,
+                    y: 4,
+                    width: size.width,
+                    height: 3,
+                },
+            );
+        })?;
+        if event::poll(Duration::from_millis(100))? {
+            if let event::Event::Key(k) = event::read()? {
+                if k.code == event::KeyCode::Char('q') {
+                    break;
+                }
+            }
+        }
+        if stats.checked.load(Ordering::Relaxed) >= stats.total.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    Ok(())
+}
+
 #[repr(align(64))]
 struct Stats {
     total: AtomicUsize,
@@ -842,6 +917,7 @@ struct Config {
     latency_weight: f32,
     ban_weight: f32,
     fast_open: bool,
+    ui: bool,
     _nic_queue_pin: bool,
 }
 
@@ -940,6 +1016,9 @@ struct Cli {
     /// Enable TCP Fast Open
     #[arg(long)]
     fast_open: bool,
+    /// Interactive dashboard
+    #[arg(long)]
+    ui: bool,
     /// Shards (fork processes)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
     //Key legitimate use cases include:
@@ -975,6 +1054,7 @@ fn merge_cfg(cli: Cli) -> Config {
         latency_weight: cli.latency_weight,
         ban_weight: cli.ban_weight,
         fast_open: cli.fast_open,
+        ui: cli.ui,
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc {
@@ -1130,10 +1210,18 @@ async fn run_validator(cfg: Arc<Config>) {
     });
 
     let start = Instant::now();
+    if cfg.ui {
+        let s = stats.clone();
+        tokio::task::spawn_blocking(move || {
+            dashboard(s, start).ok();
+        });
+    }
     let mut ticker = interval(Duration::from_secs_f64(cfg.refresh)); // ~60 Hz
     loop {
         ticker.tick().await; // This yields exactly each refresh interval
-        make_table(&stats, start, &cfg, &proxies);
+        if !cfg.ui {
+            make_table(&stats, start, &cfg, &proxies);
+        }
         if stats.checked.load(Ordering::Relaxed) >= stats.total.load(Ordering::Relaxed) {
             break;
         }
