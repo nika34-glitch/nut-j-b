@@ -6,6 +6,26 @@ use tokio::net::TcpStream;
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
 
+const DEFAULT_FEEDS: &[&str] = &[
+    // The Big Proxy List
+    "https://www.thebigproxylist.com/api/proxylist.txt",
+    // TheSpeedX/PROXY-List
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+    // TheSpeedX/SOCKS-List for additional SOCKS feeds
+    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
+    // JetKai proxy list
+    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
+    // Monosans consolidated proxies
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
+    // ClarkeTM proxy list
+    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+    // UK Proxy specific list
+    "https://raw.githubusercontent.com/proxylistuk/ukproxylist/master/uk_proxies.txt",
+];
+
 struct ProxyState {
     ewma: f32,
     avg_latency: f32,
@@ -24,20 +44,14 @@ async fn main() -> Result<()> {
 }
 
 async fn run_cycle(state: &mut HashMap<String, ProxyState>) -> Result<()> {
-    // A small sample of public proxy feeds automatically refreshed
-    let lists = vec![
-        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
-        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
-        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-    ];
+    // Refresh a curated set of public proxy feeds
+    let lists = DEFAULT_FEEDS;
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0")
         .build()?;
     let mut candidates = Vec::new();
     let mut fetches = FuturesUnordered::new();
-    for url in lists {
+    for &url in lists {
         let c = client.clone();
         fetches.push(async move {
             if let Ok(resp) = c.get(url).send().await {
