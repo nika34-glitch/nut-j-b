@@ -40,13 +40,13 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 #[cfg(feature = "free")]
+use tokio_rustls::rustls::ServerName;
+#[cfg(feature = "free")]
 use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore},
     TlsConnector,
 };
 use tracing_subscriber;
-#[cfg(feature = "free")]
-use tokio_rustls::rustls::ServerName;
 
 #[cfg(feature = "free")]
 mod free;
@@ -57,7 +57,13 @@ mod free {
     pub struct FreeManager;
     pub const MAX_RPS: u16 = 15;
     impl FreeManager {
-        pub async fn detect(_rps: u16, _q: Duration, _lw: f32, _bw: f32) -> Self {
+        pub async fn detect(
+            _rps: u16,
+            _q: Duration,
+            _lw: f32,
+            _bw: f32,
+            _backend: Option<&str>,
+        ) -> Self {
             Self
         }
         pub fn len(&self) -> usize {
