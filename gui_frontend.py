@@ -12,20 +12,22 @@ class CLIFrontend(tk.Tk):
         super().__init__()
         self.title("Analysis Tool GUI")
         self.geometry("600x400")
-        self.configure(bg="#000000")
+        self.configure(bg="#333333")
 
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("TFrame", background="#000000")
-        style.configure("TLabel", background="#000000", foreground="#d0d0d0")
-        style.configure("TButton", background="#333333", foreground="#ffffff")
-        style.configure("TEntry", fieldbackground="#333333", foreground="#ffffff")
+        style.configure("TFrame", background="#333333")
+        style.configure("TLabel", background="#333333", foreground="#d0d0d0")
+        style.configure("TButton", background="#000000", foreground="#ffffff")
+        style.configure("TEntry", fieldbackground="#000000", foreground="#ffffff")
+        style.map("TButton", background=[("active", "#111111")])
 
         self.cmd_var = tk.StringVar(value="./libero_validator")
         self.args_var = tk.StringVar()
+        self.stats_var = tk.StringVar(value="")
         self.process = None
         self.create_widgets()
 
@@ -52,6 +54,7 @@ class CLIFrontend(tk.Tk):
         self.output.configure(yscrollcommand=scrollbar.set)
         self.output.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
+        ttk.Label(self, textvariable=self.stats_var, style="TLabel").pack(fill='x', padx=10, pady=(0,10))
 
     def browse_cmd(self):
         path = filedialog.askopenfilename(title="Select executable")
@@ -73,6 +76,7 @@ class CLIFrontend(tk.Tk):
                 )
                 for line in self.process.stdout:
                     self.append_output(line)
+                    self.update_stats(line)
             except FileNotFoundError:
                 self.append_output("Command not found\n")
             finally:
@@ -87,10 +91,30 @@ class CLIFrontend(tk.Tk):
             messagebox.showinfo("Not running", "No process to stop")
 
     def append_output(self, text):
+        self.output.after(0, self._append_output, text)
+
+    def _append_output(self, text):
         self.output.config(state='normal')
         self.output.insert(tk.END, text)
         self.output.see(tk.END)
         self.output.config(state='disabled')
+
+    def update_stats(self, line: str):
+        if not line.startswith("tot:"):
+            return
+        parts = {}
+        for item in line.strip().split():
+            if ":" in item:
+                k, v = item.split(":", 1)
+                parts[k] = v
+        try:
+            self.stats_var.set(
+                f"Checked {parts.get('chk','?')}/{parts.get('tot','?')} "
+                f"Valid {parts.get('ok','?')} Invalid {parts.get('bad','?')} "
+                f"Errors {parts.get('err','?')} Progress {parts.get('prog','?')}%"
+            )
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     app = CLIFrontend()
