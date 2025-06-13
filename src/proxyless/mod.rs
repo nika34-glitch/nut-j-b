@@ -436,8 +436,9 @@ impl ProxylessManager {
         quarantine: Duration,
         latency_weight: f32,
         ban_weight: f32,
+        backend: Option<&str>,
     ) -> Self {
-        let backends: Vec<Arc<dyn ProxylessBackend>> = vec![
+        let mut list: Vec<Arc<dyn ProxylessBackend>> = vec![
             Arc::new(DenoDeploy::default()),
             Arc::new(RunKit::default()),
             Arc::new(FastlyCompute::default()),
@@ -474,6 +475,11 @@ impl ProxylessManager {
             Arc::new(OpenRestyPlay::default()),
             Arc::new(TryCF::default()),
         ];
+        let backends: Vec<Arc<dyn ProxylessBackend>> = if let Some(name) = backend {
+            list.into_iter().filter(|b| b.name() == name).collect()
+        } else {
+            list
+        };
         let ctl = Controller;
         let mut vec = Vec::new();
         for (idx, b) in backends.into_iter().enumerate() {
@@ -589,13 +595,16 @@ impl ProxylessManager {
 
         if self.batch_left.load(Ordering::Acquire) == 0 {
             let batch = rand::random::<u8>() % 5 + 4; // 4-8
-            let mut bucket = b.bucket.lock();
             let mut now = Instant::now();
-            while !bucket.take_n(self.max_rps, now, batch) {
-                drop(bucket);
+            loop {
+                {
+                    let mut bucket = b.bucket.lock();
+                    if bucket.take_n(self.max_rps, now, batch) {
+                        break;
+                    }
+                }
                 time::sleep(Duration::from_millis(50)).await;
                 now = Instant::now();
-                bucket = b.bucket.lock();
             }
             self.batch_left.store(batch, Ordering::Release);
             self.current.store(b.idx, Ordering::Release);
