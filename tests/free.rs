@@ -9,15 +9,25 @@ use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn manager_detects_backends() {
-    let mgr = FreeManager::detect(5, Duration::from_secs(60), 1.0, 1.5, None).await;
+    let mgr = FreeManager::detect(5, Duration::from_secs(60), 1.0, 1.5, None)
+        .await
+        .unwrap();
     assert!(mgr.len() > 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn manager_filters_backend() {
-    let mgr = FreeManager::detect(5, Duration::from_secs(60), 1.0, 1.5, Some("DenoDeploy")).await;
+    let mgr = FreeManager::detect(5, Duration::from_secs(60), 1.0, 1.5, Some("DenoDeploy"))
+        .await
+        .unwrap();
     assert_eq!(mgr.len(), 1);
     assert_eq!(mgr.attempts()[0].0, "DenoDeploy");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_errors_on_unknown_backend() {
+    let res = FreeManager::detect(5, Duration::from_secs(60), 1.0, 1.5, Some("Nope")).await;
+    assert!(res.is_err());
 }
 
 async fn dual_listener() -> (tokio::net::TcpListener, tokio::net::TcpListener, u16) {

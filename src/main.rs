@@ -64,8 +64,8 @@ mod free {
             _lw: f32,
             _bw: f32,
             _backend: Option<&str>,
-        ) -> Self {
-            Self
+        ) -> anyhow::Result<Self> {
+            Ok(Self)
         }
         pub fn len(&self) -> usize {
             0
@@ -323,10 +323,8 @@ impl ProxyPool {
     }
 }
 
-fn load_proxies(path: &str) -> ProxyPool {
-    let data = std::fs::read_to_string(path).expect("Proxy file not found");
+fn parse_proxies(data: &str) -> Vec<String> {
     let mut formatted = Vec::with_capacity(data.lines().count());
-
     for ln in data.lines().map(str::trim) {
         if ln.is_empty() || ln.starts_with('#') {
             continue;
@@ -342,7 +340,6 @@ fn load_proxies(path: &str) -> ProxyPool {
                 formatted.push(format!("http://{}:{}@{}:{}", user, pwd, first, second));
             }
             (None, None) => {
-                // host:port (supports ENH#20 SOCKS4a auto proxy)
                 formatted.push(format!("socks4a://{}:{}", first, second));
             }
             _ => {
@@ -350,14 +347,17 @@ fn load_proxies(path: &str) -> ProxyPool {
             }
         }
     }
+    formatted
+}
 
+fn load_proxies(path: &str) -> ProxyPool {
+    let data = std::fs::read_to_string(path).expect("Proxy file not found");
+    let mut formatted = parse_proxies(&data);
     if formatted.is_empty() {
         panic!("Proxy file is empty or invalid");
     }
-
     #[cfg(target_os = "linux")]
     prewarm_syn_pool(&formatted); // ENH#5 SYN pool warm‑up
-
     ProxyPool::new(formatted)
 }
 
@@ -373,12 +373,7 @@ async fn watch_proxies(path: String, pool: ProxyPool) {
             if let Ok(modified) = meta.modified() {
                 if Some(modified) != last {
                     if let Ok(data) = fs::read_to_string(&path).await {
-                        let proxies: Vec<String> = data
-                            .lines()
-                            .map(str::trim)
-                            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                            .map(|l| l.to_string())
-                            .collect();
+                        let proxies = parse_proxies(&data);
                         if !proxies.is_empty() {
                             pool.replace(proxies);
                             last = Some(modified);
@@ -471,11 +466,11 @@ impl POP3Handler {
             Ok(Ok(s)) => s,
             _ => return false,
         };
-        if stream.write_all(request.as_bytes()).await.is_err() {
+        if tokio::time::timeout(self.timeout, stream.write_all(request.as_bytes())).await.is_err() {
             return false;
         }
         let mut buf = [0u8; 4]; // just need first 3 chars + '\n'
-        if stream.read_exact(&mut buf).await.is_err() {
+        if tokio::time::timeout(self.timeout, stream.read_exact(&mut buf)).await.is_err() {
             return false;
         }
         // Expect "+OK" quickly; rely on eBPF filter (#22) in kernel space.
@@ -531,11 +526,11 @@ impl IMAPHandler {
 
         let tag = "A1";
         let login = format!("{tag} LOGIN {} {}\r\n", user, pwd);
-        if stream.write_all(login.as_bytes()).await.is_err() {
+        if tokio::time::timeout(self.timeout, stream.write_all(login.as_bytes())).await.is_err() {
             return false;
         }
         let logout = format!("{tag} LOGOUT\r\n");
-        if stream.write_all(logout.as_bytes()).await.is_err() {
+        if tokio::time::timeout(self.timeout, stream.write_all(logout.as_bytes())).await.is_err() {
             return false;
         }
 
@@ -1102,7 +1097,8 @@ async fn run_validator(cfg: Arc<Config>) {
                 cfg.ban_weight,
                 cfg.backend.as_deref(),
             )
-            .await,
+            .await
+            .expect("no free backend"),
         );
 
         // background tasks: token refill & EWMA decay

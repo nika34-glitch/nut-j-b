@@ -221,12 +221,19 @@ impl Endpoint {
             }
             Scheme::Http | Scheme::Https | Scheme::Wss => {
                 let addr = format!("{}:{}", self.host, self.port);
-                let mut stream = TcpStream::connect(addr).await?;
-                let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
-                stream.write_all(req.as_bytes()).await?;
+                let mut stream = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    TcpStream::connect(&addr),
+                )
+                .await??;
+                let req = format!(
+                    "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
+                );
+                tokio::time::timeout(Duration::from_secs(5), stream.write_all(req.as_bytes()))
+                    .await??;
                 // Read at least the HTTP status line to avoid partial reads
                 let mut buf = [0u8; 12];
-                stream.read_exact(&mut buf).await?;
+                tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut buf)).await??;
                 let resp = std::str::from_utf8(&buf).unwrap_or("");
                 if resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200") {
                     Ok(stream)
@@ -438,7 +445,7 @@ impl FreeManager {
         latency_weight: f32,
         ban_weight: f32,
         backend: Option<&str>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let mut list: Vec<Arc<dyn FreeBackend>> = vec![
             Arc::new(DenoDeploy::default()),
             Arc::new(RunKit::default()),
@@ -481,6 +488,9 @@ impl FreeManager {
         } else {
             list
         };
+        if backends.is_empty() {
+            return Err(anyhow!("no matching free backend"));
+        }
         let ctl = Controller;
         let mut vec = Vec::new();
         for (idx, b) in backends.into_iter().enumerate() {
@@ -501,7 +511,7 @@ impl FreeManager {
                 idx,
             }));
         }
-        Self {
+        Ok(Self {
             backends: vec,
             max_rps,
             base_quarantine: quarantine,
@@ -509,7 +519,7 @@ impl FreeManager {
             ban_weight,
             current: AtomicUsize::new(0),
             batch_left: AtomicU8::new(0),
-        }
+        })
     }
 
     pub fn len(&self) -> usize {
