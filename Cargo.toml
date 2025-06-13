@@ -45,8 +45,6 @@ socket2 = "0.5"
 _tokio-uring = { package = "tokio-uring", version = "0.4", optional = true }
 # eBPF support (optional)
 redbpf = { version = "2", optional = true, default-features = false }
-# Jemalloc global allocator
-jemallocator = "0.5"
 # Optional AF_XDP / DPDK‑style user‑space networking
 afxdp = { version = "0.4", optional = true }
 # TLS / session resumption
@@ -88,6 +86,9 @@ crossterm = "0.27"
 # Memory mapped input
 memmap2 = "0.5"
 proxy_feed = { path = "./proxy_feed" }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+jemallocator = "0.5"
 
 [profile.release]
 codegen-units = 1

@@ -20,7 +20,6 @@
 
 use bloomfilter::Bloom;
 use clap::Parser;
-use jemallocator::Jemalloc;
 use libero_validator::estimate_bloom_size;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
@@ -88,6 +87,10 @@ mod free {
 
 // ---------------------------------------------------------------------------
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
+#[cfg(not(target_os = "windows"))]
+use jemallocator::Jemalloc;
+
+#[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
@@ -466,11 +469,17 @@ impl POP3Handler {
             Ok(Ok(s)) => s,
             _ => return false,
         };
-        if tokio::time::timeout(self.timeout, stream.write_all(request.as_bytes())).await.is_err() {
+        if tokio::time::timeout(self.timeout, stream.write_all(request.as_bytes()))
+            .await
+            .is_err()
+        {
             return false;
         }
         let mut buf = [0u8; 4]; // just need first 3 chars + '\n'
-        if tokio::time::timeout(self.timeout, stream.read_exact(&mut buf)).await.is_err() {
+        if tokio::time::timeout(self.timeout, stream.read_exact(&mut buf))
+            .await
+            .is_err()
+        {
             return false;
         }
         // Expect "+OK" quickly; rely on eBPF filter (#22) in kernel space.
@@ -526,11 +535,17 @@ impl IMAPHandler {
 
         let tag = "A1";
         let login = format!("{tag} LOGIN {} {}\r\n", user, pwd);
-        if tokio::time::timeout(self.timeout, stream.write_all(login.as_bytes())).await.is_err() {
+        if tokio::time::timeout(self.timeout, stream.write_all(login.as_bytes()))
+            .await
+            .is_err()
+        {
             return false;
         }
         let logout = format!("{tag} LOGOUT\r\n");
-        if tokio::time::timeout(self.timeout, stream.write_all(logout.as_bytes())).await.is_err() {
+        if tokio::time::timeout(self.timeout, stream.write_all(logout.as_bytes()))
+            .await
+            .is_err()
+        {
             return false;
         }
 
