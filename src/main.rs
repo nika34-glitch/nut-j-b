@@ -39,6 +39,7 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
+use libero_validator::estimate_bloom_size;
 #[cfg(feature = "free")]
 use tokio_rustls::rustls::ServerName;
 #[cfg(feature = "free")]
@@ -679,12 +680,7 @@ impl Stats {
     }
 }
 
-fn estimate_bloom_size(file: &File) -> usize {
-    file
-        .metadata()
-        .map(|m| std::cmp::max(1, (m.len() / 32) as usize))
-        .unwrap_or(1_000_000)
-}
+
 
 // ---------------------------------------------------------------------------
 // Consumer factory remains, queue capacity bumped (ENH#10)
