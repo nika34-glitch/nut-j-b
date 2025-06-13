@@ -64,6 +64,34 @@ const DEFAULT_FEEDS: &[&str] = &[
     "https://api.gologin.com/proxylist.txt",
     // google passed proxies
     "https://googlepassedproxylist.blogspot.com/feeds/posts/default?alt=txt",
+    // hidemy.life HTML table
+    "https://hidemy.life/en/proxy-list/",
+    // hideip.me GitHub feeds
+    "https://raw.githubusercontent.com/zloi-user/hideip.me/master/http.txt",
+    "https://raw.githubusercontent.com/zloi-user/hideip.me/master/https.txt",
+    "https://raw.githubusercontent.com/zloi-user/hideip.me/master/socks4.txt",
+    "https://raw.githubusercontent.com/zloi-user/hideip.me/master/socks5.txt",
+    // IPAddress.com proxy index
+    "https://ipaddress.com/proxy-list/",
+    // KangProxy auto list
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/master/http/http.txt",
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/master/https/https.txt",
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/master/socks4/socks4.txt",
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/master/socks5/socks5.txt",
+    // ProxyListPlus fresh list
+    "https://list.proxylistplus.com/Fresh-HTTP-Proxy-List-1",
+    // ProxyNova live proxies
+    "https://www.proxynova.com/proxy-server-list/",
+    // ProxyScrape API
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all",
+    // Proxy-List.download service
+    "https://www.proxy-list.download/api/v1/get?type=http",
+    // socks-proxy.net table
+    "https://www.socks-proxy.net/",
+    // socks5-proxy-list blog feed
+    "https://socks5-proxy-list.blogspot.com/feeds/posts/default",
+    // ProxyDB HTTP list
+    "https://proxydb.net/?protocol=http",
 ];
 
 struct ProxyState {
