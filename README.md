@@ -21,6 +21,13 @@ with:
 python otoproxy/otoproxy.py
 ```
 
+### GUI Front-end
+
+A simple Tkinter interface is available in `gui_frontend.py` for running the validator or any command-line analysis. Launch it with:
+```bash
+python gui_frontend.py
+```
+
 #Tool Description: Libero Email Credential Validator (LECV)
 #The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
 #Key legitimate use cases include:
