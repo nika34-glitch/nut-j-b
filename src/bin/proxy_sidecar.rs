@@ -4,9 +4,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use anyhow::Result;
+use futures::stream::{FuturesUnordered, StreamExt};
 
 struct ProxyState {
     ewma: f32,
+    avg_latency: f32,
     quarantine: Option<Instant>,
 }
 
@@ -22,25 +24,37 @@ async fn main() -> Result<()> {
 }
 
 async fn run_cycle(state: &mut HashMap<String, ProxyState>) -> Result<()> {
+    // A small sample of public proxy feeds automatically refreshed
     let lists = vec![
         "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
         "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
+        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
     ];
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0")
         .build()?;
     let mut candidates = Vec::new();
+    let mut fetches = FuturesUnordered::new();
     for url in lists {
-        if let Ok(resp) = client.get(url).send().await {
-            if let Ok(txt) = resp.text().await {
-                candidates.extend(txt.lines().map(|l| l.trim().to_string()));
+        let c = client.clone();
+        fetches.push(async move {
+            if let Ok(resp) = c.get(url).send().await {
+                resp.text().await.ok()
+            } else {
+                None
             }
+        });
+    }
+    while let Some(opt) = fetches.next().await {
+        if let Some(txt) = opt {
+            candidates.extend(txt.lines().map(|l| l.trim().to_string()));
         }
     }
     candidates.sort();
     candidates.dedup();
 
-    use futures::stream::{FuturesUnordered, StreamExt};
     let mut futs = FuturesUnordered::new();
     for c in candidates {
         let uri = format!("socks4a://{}", c);
@@ -58,14 +72,26 @@ async fn run_cycle(state: &mut HashMap<String, ProxyState>) -> Result<()> {
     while let Some((proxy, ok, dur)) = futs.next().await {
         let ent = state.entry(proxy.clone()).or_insert(ProxyState {
             ewma: 1.0,
+            avg_latency: dur.as_secs_f32(),
             quarantine: None,
         });
-        ent.ewma = if ok { ent.ewma * 0.9 + 0.1 } else { ent.ewma * 0.9 };
+        ent.ewma = if ok {
+            ent.ewma * 0.8 + 0.2
+        } else {
+            ent.ewma * 0.8
+        };
+        ent.avg_latency = if ent.avg_latency == 0.0 {
+            dur.as_secs_f32()
+        } else {
+            ent.avg_latency * 0.8 + dur.as_secs_f32() * 0.2
+        };
         if ent.ewma < 0.2 {
             ent.quarantine = Some(Instant::now() + Duration::from_secs(1800));
             continue;
         }
-        if ok && dur < Duration::from_millis(400) {
+        let latency_score = (1.0 - (ent.avg_latency * 1000.0 / 1000.0).min(1.0)).max(0.0);
+        let score = ent.ewma * 0.7 + latency_score * 0.3;
+        if score > 0.7 {
             good.push(proxy);
         }
     }
