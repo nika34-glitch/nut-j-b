@@ -679,6 +679,13 @@ impl Stats {
     }
 }
 
+fn estimate_bloom_size(file: &File) -> usize {
+    file
+        .metadata()
+        .map(|m| std::cmp::max(1, (m.len() / 32) as usize))
+        .unwrap_or(1_000_000)
+}
+
 // ---------------------------------------------------------------------------
 // Consumer factory remains, queue capacity bumped (ENH#10)
 
@@ -1103,15 +1110,15 @@ async fn run_validator(cfg: Arc<Config>) {
         let cfg = cfg.clone();
         async move {
             let file = File::open(&cfg.input_file).expect("Input file not found");
-            let expected = file.metadata().map(|m| m.len() / 32).unwrap_or(1_000_000);
+            let expected = estimate_bloom_size(&file);
             let mmap = unsafe { Mmap::map(&file).expect("mmap failed") };
-            let mut dedupe = Bloom::<String>::new_for_fp_rate(expected as usize, 0.01).unwrap();
+            let mut dedupe = Bloom::<String>::new_for_fp_rate(expected, 0.01).unwrap();
             for line in mmap.split(|&b| b == b'\n') {
                 if line.is_empty() {
                     continue;
                 }
                 let ln = std::str::from_utf8(line).unwrap_or("").trim();
-                if !ln.contains(':') {
+                if !ln.contains(':') || !ln.contains('@') {
                     continue;
                 }
                 if dedupe.check_and_set(&ln.to_string()) {
@@ -1121,7 +1128,9 @@ async fn run_validator(cfg: Arc<Config>) {
                 let email = it.next().unwrap().to_string();
                 let pwd = it.next().unwrap_or("").to_string();
                 stats.total.fetch_add(1, Ordering::Relaxed);
-                tx.send((email, pwd)).await.unwrap();
+                if tx.send((email, pwd)).await.is_err() {
+                    break;
+                }
             }
         }
     });
