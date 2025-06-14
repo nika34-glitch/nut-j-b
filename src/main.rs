@@ -283,8 +283,13 @@ impl ProxyPool {
             // Probe in parallel (timeout 250 ms)
             let futs = all.into_iter().map(|p| async move {
                 let start = Instant::now();
-                let _ =
-                    tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(&p)).await;
+                if let Some(addr) = extract_addr(&p) {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(250),
+                        TcpStream::connect(&addr),
+                    )
+                    .await;
+                }
                 (p, start.elapsed())
             });
             for (p, dur) in futures::future::join_all(futs).await {
@@ -323,6 +328,16 @@ impl ProxyPool {
         tokio::spawn(async move {
             pool_clone.filter_latency().await;
         });
+    }
+}
+
+fn extract_addr(proxy: &str) -> Option<String> {
+    let p = proxy.splitn(2, "://").nth(1).unwrap_or(proxy);
+    let without_user = p.rsplitn(2, '@').next().unwrap_or(p);
+    if without_user.contains(':') {
+        Some(without_user.to_string())
+    } else {
+        None
     }
 }
 
