@@ -39,6 +39,7 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
+use proxy_feed::Config as FeedConfig;
 #[cfg(feature = "free")]
 use tokio_rustls::rustls::ServerName;
 #[cfg(feature = "free")]
@@ -84,6 +85,8 @@ mod free {
         }
     }
 }
+
+mod sidecar;
 
 // ---------------------------------------------------------------------------
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
@@ -355,7 +358,7 @@ fn parse_proxies(data: &str) -> Vec<String> {
 
 fn load_proxies(path: &str) -> ProxyPool {
     let data = std::fs::read_to_string(path).expect("Proxy file not found");
-    let mut formatted = parse_proxies(&data);
+    let formatted = parse_proxies(&data);
     if formatted.is_empty() {
         panic!("Proxy file is empty or invalid");
     }
@@ -1019,6 +1022,9 @@ struct Cli {
     /// Dashboard refresh rate seconds (min 0.016)
     #[arg(long)]
     refresh: Option<f64>,
+    /// Path to proxy list
+    #[arg(long = "proxy-file")]
+    proxy_file: Option<String>,
     /// Use free backends
     #[arg(long)]
     free: bool,
@@ -1041,6 +1047,12 @@ struct Cli {
     /// Interactive dashboard
     #[arg(long)]
     ui: bool,
+    /// Run proxy sidecar mode
+    #[arg(long)]
+    sidecar: bool,
+    /// Optional feed config for sidecar
+    #[arg(long = "feed-config")]
+    feed_config: Option<String>,
     /// Shards (fork processes)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
     //Key legitimate use cases include:
@@ -1097,6 +1109,9 @@ fn merge_cfg(cli: Cli) -> Config {
     if let Some(rf) = cli.refresh {
         cfg.refresh = rf.max(0.016);
     }
+    if let Some(pf) = cli.proxy_file {
+        cfg.proxy_file = pf;
+    }
     if cfg.free && cli.shards == 1 {
         cfg.shards = 3;
     }
@@ -1142,13 +1157,18 @@ async fn run_validator(cfg: Arc<Config>) {
                 }
             });
         }
+        {
+            tokio::spawn(async move {
+                if let Err(e) = sidecar::sidecar_loop(None).await {
+                    eprintln!("sidecar error: {e}");
+                }
+            });
+        }
         Some(mgr)
     } else {
         None
     };
-    let proxies = if cfg.free {
-        ProxyPool::new(vec!["127.0.0.1:0".to_string()])
-    } else {
+    let proxies = {
         let p = load_proxies(&cfg.proxy_file);
         println!("Loaded {} proxies", p.size());
         let watch_pool = p.clone();
@@ -1265,6 +1285,22 @@ async fn main() {
     ebpf_filter::attach(); // ENH#22 optional eBPF
 
     let cli = Cli::parse();
+    if cli.sidecar {
+        let cfg = match cli.feed_config.as_deref() {
+            Some(path) => match FeedConfig::from_file(path) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    eprintln!("failed to load feed config {}: {}", path, e);
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Err(e) = sidecar::sidecar_loop(cfg.as_ref()).await {
+            eprintln!("sidecar error: {e}");
+        }
+        return;
+    }
     let cfg = Arc::new(merge_cfg(cli));
     maybe_fork(cfg.shards); // ENH#2 sharding
 

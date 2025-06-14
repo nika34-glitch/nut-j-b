@@ -43,6 +43,7 @@ class CLIFrontend(tk.Tk):
         self.quarantine_var = tk.IntVar(value=60)
         self.latency_weight_var = tk.DoubleVar(value=1.0)
         self.ban_weight_var = tk.DoubleVar(value=1.5)
+        self.proxy_file_var = tk.StringVar(value="proxies.txt")
         self.process = None
         self.create_widgets()
 
@@ -86,6 +87,9 @@ class CLIFrontend(tk.Tk):
         ban_scale.grid(row=4, column=4, sticky='ew')
         self.ban_val_lbl = ttk.Label(args_frame, text=f"{self.ban_weight_var.get():.1f}")
         self.ban_val_lbl.grid(row=4, column=5, sticky='w')
+        ttk.Label(args_frame, text="Proxy File", style="TLabel").grid(row=5, column=0, sticky='w')
+        ttk.Entry(args_frame, textvariable=self.proxy_file_var, width=20, style="TEntry").grid(row=5, column=1, columnspan=2, sticky='w')
+        ttk.Button(args_frame, text="Browse", command=self.browse_proxy, style="TButton").grid(row=5, column=3, sticky='w')
 
         btn_frame = ttk.Frame(self, style="TFrame")
         btn_frame.pack(fill='x', padx=10, pady=10)
@@ -123,6 +127,11 @@ class CLIFrontend(tk.Tk):
         if path:
             self.cmd_var.set(path)
 
+    def browse_proxy(self):
+        path = filedialog.askopenfilename(title="Select proxy file")
+        if path:
+            self.proxy_file_var.set(path)
+
     def run_cmd(self):
         if self.process:
             messagebox.showwarning("Running", "Process already running")
@@ -140,6 +149,8 @@ class CLIFrontend(tk.Tk):
             cmd.append("--full")
         if self.refresh_var.get():
             cmd += ["--refresh", str(self.refresh_var.get())]
+        if self.proxy_file_var.get():
+            cmd += ["--proxy-file", self.proxy_file_var.get()]
         if self.free_var.get():
             cmd.append("--free")
         if self.backend_var.get():

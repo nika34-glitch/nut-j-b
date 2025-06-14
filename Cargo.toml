@@ -8,11 +8,6 @@ path = "src/main.rs"
 test = false
 doctest = false
 
-[[bin]]
-name = "proxy_sidecar"
-path = "src/bin/proxy_sidecar.rs"
-test = false
-doctest = false
 
 
 [package]
