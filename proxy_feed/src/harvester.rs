@@ -1,7 +1,10 @@
+use base64::{engine::general_purpose, Engine as _};
 use bzip2::read::BzDecoder;
+use csv::ReaderBuilder;
 use flate2::read::GzDecoder;
 use regex::Regex;
 use reqwest::Client;
+use scraper::{Html, Selector};
 use std::io::Cursor;
 use std::io::Read;
 use std::{collections::HashSet, process::Stdio};
@@ -131,16 +134,96 @@ async fn fetch_from_command(cmd: &str, set: &mut HashSet<String>) -> Result<(), 
     Ok(())
 }
 
-fn extract_into_set(text: &str, set: &mut HashSet<String>) -> usize {
-    let re = Regex::new(r"(?mi)([A-Za-z0-9.-]+:\d{2,5})").unwrap();
+fn insert_proxy(ip: &str, port: &str, set: &mut HashSet<String>) -> bool {
+    let ip_clean = ip.trim_matches(|c| c == '[' || c == ']');
+    let proxy = format!("{}:{}", ip_clean, port);
+    set.insert(proxy)
+}
+
+fn extract_basic(text: &str, set: &mut HashSet<String>) -> usize {
+    let re_scheme = Regex::new(
+        r"(?xi)(?:\b(socks4|socks5|http|https)://)?\s*(?:\[(?P<ip6>[0-9a-f:]+)\]|(?P<ip4>(?:\d{1,3}\.){3}\d{1,3}))\s*[:\s,]+(?P<port>\d{2,5})",
+    )
+    .unwrap();
     let mut count = 0;
-    for caps in re.captures_iter(text) {
-        let proxy = caps.get(1).unwrap().as_str().trim().to_lowercase();
-        if set.insert(proxy) {
+    for caps in re_scheme.captures_iter(text) {
+        let ip = caps
+            .name("ip6")
+            .or_else(|| caps.name("ip4"))
+            .unwrap()
+            .as_str();
+        let port = caps.name("port").unwrap().as_str();
+        if insert_proxy(ip, port, set) {
             count += 1;
         }
     }
     count
+}
+
+fn extract_csv(text: &str, delim: u8, set: &mut HashSet<String>) -> usize {
+    let mut rdr = ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(delim)
+        .from_reader(text.as_bytes());
+    let ipv4 = Regex::new(r"^(?:\d{1,3}\.){3}\d{1,3}$").unwrap();
+    let ipv6 = Regex::new(r"^[0-9a-fA-F:]+$").unwrap();
+    let mut count = 0;
+    for rec in rdr.records() {
+        if let Ok(r) = rec {
+            if r.len() >= 2 {
+                let ip = r.get(0).unwrap().trim();
+                let port = r.get(1).unwrap().trim();
+                if (ipv4.is_match(ip) || ipv6.is_match(ip)) && port.chars().all(|c| c.is_digit(10))
+                {
+                    if insert_proxy(ip, port, set) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+fn extract_html(text: &str, set: &mut HashSet<String>) -> usize {
+    let mut count = 0;
+    let html = Html::parse_document(text);
+    if let Ok(sel) = Selector::parse("td") {
+        for elem in html.select(&sel) {
+            let cell = elem.text().collect::<String>();
+            count += extract_basic(&cell, set);
+        }
+    }
+    count
+}
+
+fn extract_base64(text: &str, set: &mut HashSet<String>) -> usize {
+    let b64_re = Regex::new(r"[A-Za-z0-9+/=]{12,}").unwrap();
+    let mut count = 0;
+    for cap in b64_re.captures_iter(text) {
+        if let Ok(decoded) = general_purpose::STANDARD.decode(cap.get(0).unwrap().as_str()) {
+            if let Ok(s) = String::from_utf8(decoded) {
+                count += extract_basic(&s, set);
+            }
+        }
+    }
+    count
+}
+
+fn extract_into_set(text: &str, set: &mut HashSet<String>) -> usize {
+    let mut total = 0;
+    total += extract_basic(text, set);
+    if text.contains(',') {
+        total += extract_csv(text, b',', set);
+    }
+    if text.contains('\t') {
+        total += extract_csv(text, b'\t', set);
+    }
+    if text.contains("<table") {
+        total += extract_html(text, set);
+    }
+    total += extract_base64(text, set);
+    total
 }
 
 fn decode_bytes(url: &str, ct: &str, bytes: &[u8]) -> Result<String, HarvestError> {
