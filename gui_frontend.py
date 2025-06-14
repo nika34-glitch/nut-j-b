@@ -63,7 +63,7 @@ class CLIFrontend(tk.Tk):
         ttk.Spinbox(args_frame, from_=0, to=10, textvariable=self.retries_var, width=5).grid(row=0, column=5, sticky='w')
         ttk.Checkbutton(args_frame, text="POP only", variable=self.poponly_var).grid(row=1, column=0, sticky='w')
         ttk.Checkbutton(args_frame, text="Full", variable=self.full_var).grid(row=1, column=1, sticky='w')
-        ttk.Checkbutton(args_frame, text="Auto Proxy", variable=self.free_var).grid(row=1, column=2, sticky='w')
+        ttk.Checkbutton(args_frame, text="Free", variable=self.free_var).grid(row=1, column=2, sticky='w')
         ttk.Checkbutton(args_frame, text="Fast Open", variable=self.fast_open_var).grid(row=1, column=3, sticky='w')
         ttk.Checkbutton(args_frame, text="Terminal UI", variable=self.ui_var).grid(row=1, column=4, sticky='w')
         ttk.Label(args_frame, text="Shards", style="TLabel").grid(row=2, column=0, sticky='w')
@@ -141,7 +141,7 @@ class CLIFrontend(tk.Tk):
         if self.refresh_var.get():
             cmd += ["--refresh", str(self.refresh_var.get())]
         if self.free_var.get():
-            cmd.append("--auto-proxy")
+            cmd.append("--free")
         if self.backend_var.get():
             cmd += ["--free-backend", self.backend_var.get()]
         if self.rps_var.get() != 15:
