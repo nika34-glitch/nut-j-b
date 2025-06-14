@@ -1,10 +1,10 @@
-use crate::{cli::Cli, db::{Database, ProxyStats}, probe, feed, scan, score::Metrics};
+use crate::{cli::Cli, db::{Database, ProxyStats}};
 use hyper::{Body, Request, Response, Method, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
 use serde::{Serialize, Deserialize};
 use dashmap::DashMap;
 use std::sync::Arc;
-use tracing::{info, debug};
+use tracing::info;
 use anyhow::Result;
 
 #[derive(Clone)]
@@ -66,7 +66,7 @@ async fn handle(req: Request<Body>, state: AppState) -> Result<Response<Body>, h
             let whole = hyper::body::to_bytes(req.into_body()).await?;
             if let Ok(fb) = serde_json::from_slice::<Feedback>(&whole) {
                 // simplified update
-                let mut row = ProxyStats {
+                let row = ProxyStats {
                     ip: fb.ip,
                     port: fb.port as i64,
                     last_success: None,

@@ -23,7 +23,6 @@ use clap::Parser;
 use libero_validator::estimate_bloom_size;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
-use regex::Regex;
 use parking_lot::Mutex;
 use rand::seq::SliceRandom;
 use rand::{rng, Rng};
@@ -56,22 +55,8 @@ mod free {
     use std::time::Duration;
     #[derive(Clone)]
     pub struct FreeManager;
-    pub const MAX_RPS: u16 = 20;
     impl FreeManager {
-        pub async fn detect(
-            _rps: u16,
-            _q: Duration,
-            _lw: f32,
-            _bw: f32,
-            _backend: Option<&str>,
-        ) -> anyhow::Result<Self> {
-            Ok(Self)
-        }
-        pub fn len(&self) -> usize {
-            0
-        }
-        pub fn refill_tokens(&self) {}
-        pub fn ewma_decay(&self) {}
+        pub fn len(&self) -> usize { 0 }
         pub async fn pop3_login(
             &self,
             _host: &str,
@@ -373,7 +358,7 @@ fn parse_proxies(data: &str) -> Vec<String> {
 
 fn load_proxies(path: &str) -> ProxyPool {
     let data = std::fs::read_to_string(path).expect("Proxy file not found");
-    let mut formatted = parse_proxies(&data);
+    let formatted = parse_proxies(&data);
     if formatted.is_empty() {
         panic!("Proxy file is empty or invalid");
     }
@@ -468,7 +453,6 @@ async fn test_proxy(proxy: String) -> (String, bool, Duration) {
 async fn fetch_scored_proxies() -> Vec<String> {
     use futures::stream::{FuturesUnordered, StreamExt};
     use proxy_feed::{harvester::fetch_all, Config, Sources};
-    use std::time::Instant;
 
     let cfg = Config {
         sources: Sources {
@@ -1085,11 +1069,6 @@ struct Config {
     refresh: f64,
     shards: usize,
     free: bool,
-    backend: Option<String>,
-    rps: u16,
-    quarantine: u64,
-    latency_weight: f32,
-    ban_weight: f32,
     fast_open: bool,
     ui: bool,
     _nic_queue_pin: bool,
@@ -1174,19 +1153,6 @@ struct Cli {
     /// Use free backends
     #[arg(long)]
     free: bool,
-    /// Force a specific free backend
-    #[arg(long = "free-backend")]
-    backend: Option<String>,
-    /// Override free RPS
-    #[arg(long = "free-rps")]
-    rps: Option<u16>,
-    /// Quarantine TTL seconds
-    #[arg(long = "free-quarantine")]
-    quarantine: Option<u64>,
-    #[arg(long = "free-latency-weight", default_value_t = 1.0)]
-    latency_weight: f32,
-    #[arg(long = "free-ban-weight", default_value_t = 1.5)]
-    ban_weight: f32,
     /// Proxy reload interval seconds
     #[arg(long = "proxy-watch", default_value_t = 30)]
     proxy_watch: u64,
@@ -1226,11 +1192,6 @@ fn merge_cfg(cli: Cli) -> Config {
         refresh: 0.016,
         shards: cli.shards,
         free: cli.free,
-        backend: cli.backend.clone(),
-        rps: cli.rps.unwrap_or(crate::free::MAX_RPS),
-        quarantine: cli.quarantine.unwrap_or(900),
-        latency_weight: cli.latency_weight,
-        ban_weight: cli.ban_weight,
         fast_open: cli.fast_open,
         ui: cli.ui,
         _nic_queue_pin: false,
