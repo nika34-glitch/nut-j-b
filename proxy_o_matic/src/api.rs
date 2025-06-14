@@ -1,10 +1,10 @@
-use crate::{cli::Cli, db::{Database, ProxyStats}, probe, feed, scan, score::Metrics};
+use crate::{cli::Cli, db::{Database, ProxyStats}};
 use hyper::{Body, Request, Response, Method, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
 use serde::{Serialize, Deserialize};
 use dashmap::DashMap;
 use std::sync::Arc;
-use tracing::{info, debug};
+use tracing::info;
 use anyhow::Result;
 
 #[derive(Clone)]

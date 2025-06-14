@@ -533,24 +533,6 @@ impl FreeManager {
             .collect()
     }
 
-    /// Refill all backend token buckets.
-    pub fn refill_tokens(&self) {
-        let now = Instant::now();
-        for b in &self.backends {
-            b.bucket.lock().refill(self.max_rps, now);
-        }
-    }
-
-    /// Periodically decay success EWMA for all backends.
-    pub fn ewma_decay(&self) {
-        for b in &self.backends {
-            let mut ewma = b.success_ewma.lock();
-            *ewma *= 0.99;
-            SUCCESS
-                .with_label_values(&[b.backend.name()])
-                .set(*ewma as f64);
-        }
-    }
 
     async fn select_backend(&self) -> Arc<BackendState> {
         loop {
