@@ -3,12 +3,14 @@
 ## Proxy Feed Fetcher
 
 This repository also includes a separate crate `proxy_feed` for aggregating raw proxy lists.
-Use the `fetch` subcommand to download public proxy sources specified in a TOML configuration
-file and append them to an output list.
+Use the `fetch` subcommand to download public proxy sources specified in a TOML configuration file and append them to an output list.
 
 ```bash
-cargo run -p proxy_feed -- fetch --config config.toml --output feeds/all_proxies.txt
+cargo run -p proxy_feed -- fetch --config proxy_feed/example-config.toml --output feeds/all_proxies.txt
 ```
+
+The example configuration lists several URLs that return HTTP proxy lists.
+Any of the sections can be omitted or replaced with your own sources. The optional `proxybroker_cmd` field allows running a custom command that outputs additional proxies.
 
 ### OtoProxy helper
 
