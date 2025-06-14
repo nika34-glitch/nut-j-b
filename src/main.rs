@@ -388,6 +388,121 @@ async fn watch_proxies(path: String, pool: ProxyPool) {
     }
 }
 
+struct ProxyMetrics {
+    latency_ms: f32,
+    success_rate: f32,
+    throughput_kbps: f32,
+    error_rate: f32,
+    anonymity_level: f32,
+    uptime_pct: f32,
+    proxy_type: f32,
+    location_score: f32,
+}
+
+fn score_metrics(m: &ProxyMetrics) -> f32 {
+    let latency_norm = 1.0 - (m.latency_ms / 2000.0).min(1.0);
+    let throughput_norm = (m.throughput_kbps / 10_000.0).min(1.0);
+    100.0
+        * (0.20 * latency_norm
+            + 0.20 * m.success_rate
+            + 0.15 * throughput_norm
+            + 0.15 * (1.0 - m.error_rate)
+            + 0.10 * (m.anonymity_level / 2.0)
+            + 0.10 * m.uptime_pct
+            + 0.05 * (m.proxy_type / 2.0)
+            + 0.05 * m.location_score)
+}
+
+async fn test_proxy(proxy: String) -> (String, bool, Duration) {
+    let start = Instant::now();
+    let parts: Vec<_> = proxy.trim_start_matches("socks4a://").split(':').collect();
+    let mut success = false;
+    if parts.len() == 2 {
+        let addr = format!("{}:{}", parts[0], parts[1]);
+        let stream_res =
+            tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await;
+        let mut stream = match stream_res {
+            Ok(Ok(s)) => s,
+            _ => return (proxy, false, start.elapsed()),
+        };
+        let mut req = Vec::new();
+        req.push(0x04u8);
+        req.push(0x01u8);
+        req.push(0);
+        req.push(110u8);
+        req.extend(&[0, 0, 0, 1]);
+        req.push(0);
+        req.extend(b"popmail.libero.it");
+        req.push(0);
+        if stream.write_all(&req).await.is_ok() {
+            let mut resp = [0u8; 8];
+            if stream.read_exact(&mut resp).await.is_ok() && resp[1] == 0x5a {
+                let mut buf = [0u8; 3];
+                if stream.read_exact(&mut buf).await.is_ok() {
+                    success = &buf == b"+OK";
+                }
+            }
+        }
+    }
+    (proxy, success, start.elapsed())
+}
+
+async fn fetch_scored_proxies() -> Vec<String> {
+    use futures::stream::{FuturesUnordered, StreamExt};
+    use proxy_feed::{harvester::fetch_all, Config, Sources};
+    use std::time::Instant;
+
+    let cfg = Config {
+        sources: Sources {
+            free_proxy_list: Some(
+                "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt"
+                    .to_string(),
+            ),
+            ssl_proxies: Some(
+                "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+                    .to_string(),
+            ),
+            proxy_scrape: None,
+            github_lists: None,
+            proxybroker_cmd: None,
+        },
+    };
+
+    let set = match fetch_all(&cfg).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("failed to fetch proxies: {e}");
+            return Vec::new();
+        }
+    };
+
+    let mut futs = FuturesUnordered::new();
+    for p in set {
+        futs.push(async move {
+            let (p, ok, dur) = test_proxy(format!("socks4a://{}", p)).await;
+            let metrics = ProxyMetrics {
+                latency_ms: dur.as_secs_f32() * 1000.0,
+                success_rate: if ok { 1.0 } else { 0.0 },
+                throughput_kbps: 0.0,
+                error_rate: if ok { 0.0 } else { 1.0 },
+                anonymity_level: 1.0,
+                uptime_pct: 1.0,
+                proxy_type: 1.0,
+                location_score: 0.5,
+            };
+            (p, score_metrics(&metrics))
+        });
+    }
+
+    let mut good = Vec::new();
+    while let Some((proxy, score)) = futs.next().await {
+        if score >= 75.0 {
+            good.push(proxy);
+        }
+    }
+    good
+}
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[cfg(feature = "free")]
@@ -1108,46 +1223,11 @@ fn merge_cfg(cli: Cli) -> Config {
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 async fn run_validator(cfg: Arc<Config>) {
-    let free = if cfg.free {
-        let mgr = Arc::new(
-            free::FreeManager::detect(
-                cfg.rps,
-                Duration::from_secs(cfg.quarantine),
-                cfg.latency_weight,
-                cfg.ban_weight,
-                cfg.backend.as_deref(),
-            )
-            .await
-            .expect("no free backend"),
-        );
-
-        // background tasks: token refill & EWMA decay
-        {
-            let m = mgr.clone();
-            tokio::spawn(async move {
-                let mut t = interval(Duration::from_millis(100));
-                loop {
-                    t.tick().await;
-                    m.refill_tokens();
-                }
-            });
-        }
-        {
-            let m = mgr.clone();
-            tokio::spawn(async move {
-                let mut t = interval(Duration::from_secs(30));
-                loop {
-                    t.tick().await;
-                    m.ewma_decay();
-                }
-            });
-        }
-        Some(mgr)
-    } else {
-        None
-    };
+    let free = None;
     let proxies = if cfg.free {
-        ProxyPool::new(vec!["127.0.0.1:0".to_string()])
+        let list = fetch_scored_proxies().await;
+        println!("Fetched {} proxies", list.len());
+        ProxyPool::new(list)
     } else {
         let p = load_proxies(&cfg.proxy_file);
         println!("Loaded {} proxies", p.size());
