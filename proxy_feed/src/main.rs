@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use proxy_feed::{harvester, Config};
+use rand::rng;
 use rand::seq::SliceRandom;
 use tracing_subscriber::fmt;
 
@@ -49,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let mut proxies: Vec<_> = set.into_iter().collect();
             if shuffle {
-                let mut rng = rand::thread_rng();
+                let mut rng = rng();
                 proxies.shuffle(&mut rng);
             } else {
                 proxies.sort();

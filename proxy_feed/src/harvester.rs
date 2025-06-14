@@ -1,9 +1,15 @@
+use bzip2::read::BzDecoder;
+use flate2::read::GzDecoder;
 use regex::Regex;
 use reqwest::Client;
+use std::io::Cursor;
+use std::io::Read;
 use std::{collections::HashSet, process::Stdio};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{error, info};
+use zip::read::ZipArchive;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 use crate::Config;
 
@@ -70,17 +76,26 @@ async fn fetch_from_url(
 ) -> Result<(), HarvestError> {
     info!("fetching {}", url);
     match client.get(url).send().await {
-        Ok(resp) => match resp.text().await {
-            Ok(text) => {
-                let count = extract_into_set(&text, set);
-                info!("fetched {} entries from {}", count, url);
-                Ok(())
+        Ok(resp) => {
+            let ct_header = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            match resp.bytes().await {
+                Ok(bytes) => {
+                    let text = decode_bytes(url, &ct_header, &bytes)?;
+                    let count = extract_into_set(&text, set);
+                    info!("fetched {} entries from {}", count, url);
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("error reading {}: {}", url, e);
+                    Err(HarvestError::Http(url.to_string(), e))
+                }
             }
-            Err(e) => {
-                error!("error reading {}: {}", url, e);
-                Err(HarvestError::Http(url.to_string(), e))
-            }
-        },
+        }
         Err(e) => {
             error!("http error {}: {}", url, e);
             Err(HarvestError::Http(url.to_string(), e))
@@ -126,4 +141,50 @@ fn extract_into_set(text: &str, set: &mut HashSet<String>) -> usize {
         }
     }
     count
+}
+
+fn decode_bytes(url: &str, ct: &str, bytes: &[u8]) -> Result<String, HarvestError> {
+    let lower_ct = ct.to_ascii_lowercase();
+
+    if lower_ct.contains("gzip") || url.ends_with(".gz") {
+        let mut d = String::new();
+        GzDecoder::new(bytes)
+            .read_to_string(&mut d)
+            .map_err(HarvestError::Io)?;
+        return Ok(d);
+    }
+    if lower_ct.contains("bzip2") || url.ends_with(".bz2") {
+        let mut d = String::new();
+        BzDecoder::new(bytes)
+            .read_to_string(&mut d)
+            .map_err(HarvestError::Io)?;
+        return Ok(d);
+    }
+    if lower_ct.contains("zstd") || url.ends_with(".zst") || url.ends_with(".zstd") {
+        let mut d = String::new();
+        ZstdDecoder::new(bytes)
+            .map_err(HarvestError::Io)?
+            .read_to_string(&mut d)
+            .map_err(HarvestError::Io)?;
+        return Ok(d);
+    }
+    if lower_ct.contains("zip") || url.ends_with(".zip") {
+        let cursor = Cursor::new(bytes);
+        let mut archive =
+            ZipArchive::new(cursor).map_err(|e| HarvestError::Io(std::io::Error::other(e)))?;
+        let mut combined = String::new();
+        for i in 0..archive.len() {
+            let mut file = archive
+                .by_index(i)
+                .map_err(|e| HarvestError::Io(std::io::Error::other(e)))?;
+            let mut s = String::new();
+            file.read_to_string(&mut s).map_err(HarvestError::Io)?;
+            combined.push_str(&s);
+            combined.push('\n');
+        }
+        return Ok(combined);
+    }
+
+    // default: treat as utf-8 text
+    Ok(String::from_utf8_lossy(bytes).into_owned())
 }
