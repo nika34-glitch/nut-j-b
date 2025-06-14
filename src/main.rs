@@ -332,11 +332,20 @@ fn parse_proxies(data: &str) -> Vec<String> {
         if ln.is_empty() || ln.starts_with('#') {
             continue;
         }
+
         let mut parts = ln.splitn(4, ':');
         let first = parts.next().unwrap_or("");
-        let second = parts.next().unwrap_or("");
+        let second_opt = parts.next();
         let third = parts.next();
         let fourth = parts.next();
+
+        let second = match second_opt {
+            Some(p) if !p.is_empty() && p.parse::<u16>().is_ok() => p,
+            _ => {
+                eprintln!("Skipping malformed proxy: {}", ln);
+                continue;
+            }
+        };
 
         match (third, fourth) {
             (Some(user), Some(pwd)) => {
@@ -715,6 +724,15 @@ mod tests {
         let (p, i) = resolve_hosts("example.com");
         assert_eq!(p, "example.com");
         assert_eq!(i, "example.com");
+    }
+
+    #[test]
+    fn parse_proxies_skips_invalid() {
+        let data = "\n# comment\n127.0.0.1\n1.1.1.1:8080\nfoo:bar\nexample.com:1234:user:pass";
+        let proxies = parse_proxies(data);
+        assert_eq!(proxies.len(), 2);
+        assert!(proxies.contains(&"socks4a://1.1.1.1:8080".to_string()));
+        assert!(proxies.contains(&"http://user:pass@example.com:1234".to_string()));
     }
 }
 
