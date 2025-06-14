@@ -872,9 +872,14 @@ fn create_consumer(
                     break;
                 }
                 stats.retries.fetch_add(1, Ordering::Relaxed);
-                let exp = cfg.backoff_base * (2.0_f64).powi(retry as i32);
+                let mut exp = cfg.backoff_base * (2.0_f64).powi(retry as i32);
+                if !exp.is_finite() || exp > 1e6 {
+                    exp = 1e6;
+                }
                 let jitter = rand::rng().random_range(0.0..exp);
-                tokio::time::sleep(Duration::from_secs_f64(jitter)).await;
+                if jitter.is_finite() {
+                    tokio::time::sleep(Duration::from_secs_f64(jitter)).await;
+                }
             }
 
             stats.checked.fetch_add(1, Ordering::Relaxed);
