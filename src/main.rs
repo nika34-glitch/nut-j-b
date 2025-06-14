@@ -23,7 +23,6 @@ use clap::Parser;
 use libero_validator::estimate_bloom_size;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
-use regex::Regex;
 use parking_lot::Mutex;
 use rand::seq::SliceRandom;
 use rand::{rng, Rng};
@@ -70,8 +69,6 @@ mod free {
         pub fn len(&self) -> usize {
             0
         }
-        pub fn refill_tokens(&self) {}
-        pub fn ewma_decay(&self) {}
         pub async fn pop3_login(
             &self,
             _host: &str,
@@ -468,7 +465,6 @@ async fn test_proxy(proxy: String) -> (String, bool, Duration) {
 async fn fetch_scored_proxies() -> Vec<String> {
     use futures::stream::{FuturesUnordered, StreamExt};
     use proxy_feed::{harvester::fetch_all, Config, Sources};
-    use std::time::Instant;
 
     let cfg = Config {
         sources: Sources {
