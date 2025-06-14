@@ -156,7 +156,7 @@ struct ProxyMetrics {
     success_rate: f32,
     throughput_kbps: f32,
     error_rate: f32,
-    anonymity_level: f32,
+    rate_limit_score: f32,
     uptime_pct: f32,
     proxy_type: f32,
     location_score: f32,
@@ -170,7 +170,7 @@ fn score_metrics(m: &ProxyMetrics) -> f32 {
             + 0.20 * m.success_rate
             + 0.15 * throughput_norm
             + 0.15 * (1.0 - m.error_rate)
-            + 0.10 * (m.anonymity_level / 2.0)
+            + 0.10 * m.rate_limit_score
             + 0.10 * m.uptime_pct
             + 0.05 * (m.proxy_type / 2.0)
             + 0.05 * m.location_score)
@@ -257,7 +257,7 @@ async fn run_cycle(
             success_rate: ent.ewma,
             throughput_kbps: 0.0,
             error_rate: 1.0 - ent.ewma,
-            anonymity_level: 1.0,
+            rate_limit_score: ent.ewma,
             uptime_pct: 1.0,
             proxy_type: 1.0,
             location_score: 0.5,

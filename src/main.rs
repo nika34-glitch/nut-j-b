@@ -55,7 +55,7 @@ mod free {
     use std::time::Duration;
     #[derive(Clone)]
     pub struct FreeManager;
-    pub const MAX_RPS: u16 = 15;
+    pub const MAX_RPS: u16 = 20;
     impl FreeManager {
         pub async fn detect(
             _rps: u16,
@@ -388,14 +388,14 @@ fn load_proxies(path: &str) -> ProxyPool {
     ProxyPool::new(formatted)
 }
 
-async fn watch_proxies(path: String, pool: ProxyPool) {
+async fn watch_proxies(path: String, pool: ProxyPool, interval: u64) {
     use std::time::SystemTime;
     use tokio::fs;
     use tokio::time::sleep;
 
     let mut last: Option<SystemTime> = None;
     loop {
-        sleep(Duration::from_secs(30)).await;
+        sleep(Duration::from_secs(interval)).await;
         if let Ok(meta) = fs::metadata(&path).await {
             if let Ok(modified) = meta.modified() {
                 if Some(modified) != last {
@@ -417,7 +417,7 @@ struct ProxyMetrics {
     success_rate: f32,
     throughput_kbps: f32,
     error_rate: f32,
-    anonymity_level: f32,
+    rate_limit_score: f32,
     uptime_pct: f32,
     proxy_type: f32,
     location_score: f32,
@@ -431,7 +431,7 @@ fn score_metrics(m: &ProxyMetrics) -> f32 {
             + 0.20 * m.success_rate
             + 0.15 * throughput_norm
             + 0.15 * (1.0 - m.error_rate)
-            + 0.10 * (m.anonymity_level / 2.0)
+            + 0.10 * m.rate_limit_score
             + 0.10 * m.uptime_pct
             + 0.05 * (m.proxy_type / 2.0)
             + 0.05 * m.location_score)
@@ -479,11 +479,11 @@ async fn fetch_scored_proxies() -> Vec<String> {
     let cfg = Config {
         sources: Sources {
             free_proxy_list: Some(
-                "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt"
+                "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/http.txt"
                     .to_string(),
             ),
             ssl_proxies: Some(
-                "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+                "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"
                     .to_string(),
             ),
             proxy_scrape: None,
@@ -509,7 +509,7 @@ async fn fetch_scored_proxies() -> Vec<String> {
                 success_rate: if ok { 1.0 } else { 0.0 },
                 throughput_kbps: 0.0,
                 error_rate: if ok { 0.0 } else { 1.0 },
-                anonymity_level: 1.0,
+                rate_limit_score: if dur.as_millis() < 1000 && ok { 1.0 } else { 0.0 },
                 uptime_pct: 1.0,
                 proxy_type: 1.0,
                 location_score: 0.5,
@@ -1076,6 +1076,7 @@ struct Config {
     concurrency: usize,
     input_file: String,
     proxy_file: String,
+    watch_interval: u64,
     poponly: bool,
     full: bool,
     refresh: f64,
@@ -1183,6 +1184,9 @@ struct Cli {
     latency_weight: f32,
     #[arg(long = "free-ban-weight", default_value_t = 1.5)]
     ban_weight: f32,
+    /// Proxy reload interval seconds
+    #[arg(long = "proxy-watch", default_value_t = 30)]
+    proxy_watch: u64,
     /// Enable TCP Fast Open
     #[arg(long)]
     fast_open: bool,
@@ -1213,6 +1217,7 @@ fn merge_cfg(cli: Cli) -> Config {
         concurrency: 3_000,
         input_file: "combos.txt".to_string(),
         proxy_file: "proxies.txt".to_string(),
+        watch_interval: cli.proxy_watch,
         poponly: false,
         full: false,
         refresh: 0.016,
@@ -1266,8 +1271,9 @@ async fn run_validator(cfg: Arc<Config>) {
         println!("Loaded {} proxies", p.size());
         let watch_pool = p.clone();
         let path = cfg.proxy_file.clone();
+        let watch_interval = cfg.watch_interval;
         tokio::spawn(async move {
-            watch_proxies(path, watch_pool).await;
+            watch_proxies(path, watch_pool, watch_interval).await;
         });
         p
     };

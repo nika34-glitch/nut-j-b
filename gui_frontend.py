@@ -64,10 +64,11 @@ class CLIFrontend(tk.Tk):
         self.ui_var = tk.BooleanVar()
         self.shards_var = tk.IntVar(value=1)
         self.backend_var = tk.StringVar()
-        self.rps_var = tk.IntVar(value=15)
+        self.rps_var = tk.IntVar(value=20)
         self.quarantine_var = tk.IntVar(value=60)
         self.latency_weight_var = tk.DoubleVar(value=1.0)
         self.ban_weight_var = tk.DoubleVar(value=1.5)
+        self.watch_var = tk.IntVar(value=30)
         self.process = None
         self.create_widgets()
 
@@ -101,20 +102,23 @@ class CLIFrontend(tk.Tk):
         ttk.Spinbox(args_frame, from_=1, to=100, textvariable=self.rps_var, width=5).grid(row=3, column=3, sticky='w')
         ttk.Label(args_frame, text="Quarantine", style="TLabel").grid(row=3, column=4, sticky='w')
         ttk.Spinbox(args_frame, from_=0, to=3600, textvariable=self.quarantine_var, width=7).grid(row=3, column=5, sticky='w')
-        ttk.Label(args_frame, text="Latency Weight", style="TLabel").grid(row=4, column=0, sticky='w')
+        ttk.Label(args_frame, text="Watch Int", style="TLabel").grid(row=4, column=0, sticky='w')
+        ttk.Spinbox(args_frame, from_=5, to=300, textvariable=self.watch_var, width=7).grid(row=4, column=1, sticky='w')
+        ttk.Label(args_frame, text="Latency Weight", style="TLabel").grid(row=4, column=2, sticky='w')
         latency_scale = ttk.Scale(args_frame, from_=0.1, to=5.0, orient='horizontal', variable=self.latency_weight_var, command=self.update_latency_label)
-        latency_scale.grid(row=4, column=1, sticky='ew')
+        latency_scale.grid(row=4, column=3, sticky='ew')
         self.latency_val_lbl = ttk.Label(args_frame, text=f"{self.latency_weight_var.get():.1f}")
-        self.latency_val_lbl.grid(row=4, column=2, sticky='w')
-        ttk.Label(args_frame, text="Ban Weight", style="TLabel").grid(row=4, column=3, sticky='w')
+        self.latency_val_lbl.grid(row=4, column=4, sticky='w')
+        ttk.Label(args_frame, text="Ban Weight", style="TLabel").grid(row=4, column=5, sticky='w')
         ban_scale = ttk.Scale(args_frame, from_=0.1, to=5.0, orient='horizontal', variable=self.ban_weight_var, command=self.update_ban_label)
-        ban_scale.grid(row=4, column=4, sticky='ew')
+        ban_scale.grid(row=4, column=6, sticky='ew')
         self.ban_val_lbl = ttk.Label(args_frame, text=f"{self.ban_weight_var.get():.1f}")
-        self.ban_val_lbl.grid(row=4, column=5, sticky='w')
+        self.ban_val_lbl.grid(row=4, column=7, sticky='w')
 
         btn_frame = ttk.Frame(self, style="TFrame")
         btn_frame.pack(fill='x', padx=10, pady=10)
-        ttk.Button(btn_frame, text="Run", command=self.run_cmd, style="TButton").pack(side='left')
+        ttk.Button(btn_frame, text="Build Free", command=self.build_free, style="TButton").pack(side='left')
+        ttk.Button(btn_frame, text="Run", command=self.run_cmd, style="TButton").pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Stop", command=self.stop_cmd, style="TButton").pack(side='left', padx=5)
         output_frame = ttk.Frame(self, style="TFrame")
         output_frame.pack(fill='both', expand=True, padx=10, pady=10)
@@ -175,10 +179,10 @@ class CLIFrontend(tk.Tk):
         if self.refresh_var.get():
             cmd += ["--refresh", str(self.refresh_var.get())]
         if self.free_var.get():
-            cmd.append("--auto-proxy")
+            cmd.append("--free")
         if self.backend_var.get():
             cmd += ["--free-backend", self.backend_var.get()]
-        if self.rps_var.get() != 15:
+        if self.rps_var.get() != 20:
             cmd += ["--free-rps", str(self.rps_var.get())]
         if self.quarantine_var.get() != 60:
             cmd += ["--free-quarantine", str(self.quarantine_var.get())]
@@ -186,6 +190,8 @@ class CLIFrontend(tk.Tk):
             cmd += ["--free-latency-weight", str(self.latency_weight_var.get())]
         if self.ban_weight_var.get() != 1.5:
             cmd += ["--free-ban-weight", str(self.ban_weight_var.get())]
+        if self.watch_var.get() != 30:
+            cmd += ["--proxy-watch", str(self.watch_var.get())]
         if self.fast_open_var.get():
             cmd.append("--fast-open")
         if self.ui_var.get():
@@ -207,6 +213,33 @@ class CLIFrontend(tk.Tk):
                 self.append_output("Command not found\n")
             finally:
                 self.process = None
+        threading.Thread(target=target, daemon=True).start()
+
+    def build_free(self):
+        if self.process:
+            messagebox.showwarning("Running", "Process already running")
+            return
+        cmd = [
+            "bash",
+            "-c",
+            "RUSTFLAGS='-C target-cpu=native' cargo build --release --features free",
+        ]
+        self.output.config(state='normal')
+        self.output.delete('1.0', tk.END)
+        self.output.config(state='disabled')
+
+        def target():
+            try:
+                self.process = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+                )
+                for line in self.process.stdout:
+                    self.append_output(line)
+            except FileNotFoundError:
+                self.append_output("Cargo not found\n")
+            finally:
+                self.process = None
+
         threading.Thread(target=target, daemon=True).start()
 
     def stop_cmd(self):
