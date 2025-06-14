@@ -56,7 +56,9 @@ mod free {
     #[derive(Clone)]
     pub struct FreeManager;
     impl FreeManager {
-        pub fn len(&self) -> usize { 0 }
+        pub fn len(&self) -> usize {
+            0
+        }
         pub async fn pop3_login(
             &self,
             _host: &str,
@@ -270,11 +272,9 @@ impl ProxyPool {
             let futs = all.into_iter().map(|p| async move {
                 let start = Instant::now();
                 if let Some(addr) = extract_addr(&p) {
-                    let _ = tokio::time::timeout(
-                        Duration::from_millis(250),
-                        TcpStream::connect(&addr),
-                    )
-                    .await;
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(&addr))
+                            .await;
                 }
                 (p, start.elapsed())
             });
@@ -299,6 +299,9 @@ impl ProxyPool {
         let idx = self.idx.fetch_add(1, Ordering::Relaxed);
         let lock = self.cycle.lock();
         let len = lock.len();
+        if len == 0 {
+            return String::new();
+        }
         lock[idx % len].clone()
     }
 
@@ -345,7 +348,13 @@ fn parse_proxies(data: &str) -> Vec<String> {
             let host = cap.name("host").unwrap().as_str();
             let port = cap.name("port").unwrap().as_str();
             if let (Some(user), Some(pwd)) = (cap.name("user"), cap.name("pwd")) {
-                formatted.push(format!("http://{}:{}@{}:{}", user.as_str(), pwd.as_str(), host, port));
+                formatted.push(format!(
+                    "http://{}:{}@{}:{}",
+                    user.as_str(),
+                    pwd.as_str(),
+                    host,
+                    port
+                ));
             } else {
                 formatted.push(format!("socks4a://{}:{}", host, port));
             }
@@ -418,8 +427,12 @@ fn score_metrics(m: &ProxyMetrics) -> f32 {
 
 async fn test_proxy(proxy: String) -> (String, bool, Duration) {
     let start = Instant::now();
-    let parts: Vec<_> = proxy.trim_start_matches("socks4a://").split(':').collect();
+    let (scheme, rest) = match proxy.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => ("socks4a", proxy.as_str()),
+    };
     let mut success = false;
+    let parts: Vec<_> = rest.split(':').collect();
     if parts.len() == 2 {
         let addr = format!("{}:{}", parts[0], parts[1]);
         let stream_res =
@@ -428,21 +441,41 @@ async fn test_proxy(proxy: String) -> (String, bool, Duration) {
             Ok(Ok(s)) => s,
             _ => return (proxy, false, start.elapsed()),
         };
-        let mut req = Vec::new();
-        req.push(0x04u8);
-        req.push(0x01u8);
-        req.push(0);
-        req.push(110u8);
-        req.extend(&[0, 0, 0, 1]);
-        req.push(0);
-        req.extend(b"popmail.libero.it");
-        req.push(0);
-        if stream.write_all(&req).await.is_ok() {
-            let mut resp = [0u8; 8];
-            if stream.read_exact(&mut resp).await.is_ok() && resp[1] == 0x5a {
-                let mut buf = [0u8; 3];
-                if stream.read_exact(&mut buf).await.is_ok() {
-                    success = &buf == b"+OK";
+        match scheme {
+            "http" | "https" => {
+                let target = "popmail.libero.it:110";
+                let req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
+                if stream.write_all(req.as_bytes()).await.is_ok() {
+                    let mut buf = [0u8; 32];
+                    if stream.read_exact(&mut buf).await.is_ok()
+                        && buf.starts_with(b"HTTP/1.")
+                        && std::str::from_utf8(&buf).map_or(false, |s| s.contains("200"))
+                    {
+                        let mut greet = [0u8; 3];
+                        if stream.read_exact(&mut greet).await.is_ok() {
+                            success = &greet == b"+OK";
+                        }
+                    }
+                }
+            }
+            _ => {
+                let mut req = Vec::new();
+                req.push(0x04u8);
+                req.push(0x01u8);
+                req.push(0);
+                req.push(110u8);
+                req.extend(&[0, 0, 0, 1]);
+                req.push(0);
+                req.extend(b"popmail.libero.it");
+                req.push(0);
+                if stream.write_all(&req).await.is_ok() {
+                    let mut resp = [0u8; 8];
+                    if stream.read_exact(&mut resp).await.is_ok() && resp[1] == 0x5a {
+                        let mut buf = [0u8; 3];
+                        if stream.read_exact(&mut buf).await.is_ok() {
+                            success = &buf == b"+OK";
+                        }
+                    }
                 }
             }
         }
@@ -452,31 +485,109 @@ async fn test_proxy(proxy: String) -> (String, bool, Duration) {
 
 async fn fetch_scored_proxies() -> Vec<String> {
     use futures::stream::{FuturesUnordered, StreamExt};
-    use proxy_feed::{harvester::fetch_all, Config, Sources};
+    use regex::Regex;
+    use std::collections::HashSet;
 
-    let cfg = Config {
-        sources: Sources {
-            free_proxy_list: Some(
-                "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/http.txt"
-                    .to_string(),
-            ),
-            ssl_proxies: Some(
-                "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"
-                    .to_string(),
-            ),
-            proxy_scrape: None,
-            github_lists: None,
-            proxybroker_cmd: None,
-        },
-    };
+    const FEEDS: &[&str] = &[
+        "https://www.thebigproxylist.com/api/proxylist.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
+        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+        "https://raw.githubusercontent.com/proxylistuk/ukproxylist/master/uk_proxies.txt",
+        "https://free-proxy-list.net/",
+        "https://raw.githubusercontent.com/checkerproxy/vps/main/proxy.txt",
+        "https://www.coderduck.com/ports/api/proxy?key=free&https=true&format=txt",
+        "https://cool-proxy.net/proxies.json",
+        "https://raw.githubusercontent.com/Elliottophellia/proxylist/main/proxies.txt",
+        "https://api.experte.com/proxylist?format=txt",
+        "https://floppydata.com/proxies.txt",
+        "https://fosy.club/free-proxy-list.txt",
+        "https://free-proxy-list.com/",
+        "https://freeproxylist.cc/feeds/freeproxylist.txt",
+        "https://www.freeproxylists.com/api/proxylist.txt",
+        "https://www.freeproxylists.net/?format=txt",
+        "https://raw.githubusercontent.com/roosterkid/freeproxylist/main/proxies.txt",
+        "https://freshnewproxies24.top/latest.txt",
+        "http://proxygather.com/api/proxies.txt",
+        "https://proxylist.geonode.com/api/proxy-list?limit=10000&format=txt",
+        "https://api.getproxylist.com/proxy.txt",
+        "https://api.gologin.com/proxylist.txt",
+        "https://googlepassedproxylist.blogspot.com/feeds/posts/default?alt=txt",
+        "https://hidemy.life/en/proxy-list/",
+        "https://raw.githubusercontent.com/zloi-user/hideip.me/master/http.txt",
+        "https://raw.githubusercontent.com/zloi-user/hideip.me/master/https.txt",
+        "https://raw.githubusercontent.com/zloi-user/hideip.me/master/socks4.txt",
+        "https://raw.githubusercontent.com/zloi-user/hideip.me/master/socks5.txt",
+        "https://ipaddress.com/proxy-list/",
+        "https://raw.githubusercontent.com/officialputuid/KangProxy/master/http/http.txt",
+        "https://raw.githubusercontent.com/officialputuid/KangProxy/master/https/https.txt",
+        "https://raw.githubusercontent.com/officialputuid/KangProxy/master/socks4/socks4.txt",
+        "https://raw.githubusercontent.com/officialputuid/KangProxy/master/socks5/socks5.txt",
+        "https://list.proxylistplus.com/Fresh-HTTP-Proxy-List-1",
+        "https://www.proxynova.com/proxy-server-list/",
+        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all",
+        "https://www.proxy-list.download/api/v1/get?type=http",
+        "https://www.socks-proxy.net/",
+        "https://socks5-proxy-list.blogspot.com/feeds/posts/default",
+        "https://proxydb.net/?protocol=http",
+        "https://sockslist.us/api",
+        "https://spys.one/en/http-proxy-list/",
+        "https://spys.one/en/socks-proxy-list/",
+        "https://raw.githubusercontent.com/spoofs/proxy/main/list.txt",
+        "https://www.sslproxies.org/",
+        "https://free-proxy-list.net/uk-proxy.html",
+        "https://www.us-proxy.org/",
+        "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/proxy-list.txt",
+        "https://workingproxylisttxt.blogspot.com/feeds/posts/default?alt=txt",
+        "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/proxy_list.txt",
+        "https://www.89ip.cn/tqdl.html",
+        "http://www.66ip.cn/mo.php?tqsl=1000",
+        "https://www.kuaidaili.com/free/inha/",
+        "https://raw.githubusercontent.com/a2u/free-proxy-list/main/proxy_list.txt",
+        "https://raw.githubusercontent.com/HUYDGD/AutoGetProxy/master/all_proxies.txt",
+        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/proxies.txt",
+        "https://raw.githubusercontent.com/ForceFledgling/ProxyHub/master/proxy_list.txt",
+        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/proxy.txt",
+        "https://raw.githubusercontent.com/prxchk/Proxy-List/master/proxy-list.txt",
+        "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/proxies.txt",
+        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies.txt",
+        "https://raw.githubusercontent.com/gitrecon1455/fresh-proxy-list/main/proxies.txt",
+        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/http.txt",
+        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/https.txt",
+        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks4.txt",
+        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt",
+    ];
 
-    let set = match fetch_all(&cfg).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("failed to fetch proxies: {e}");
-            return Vec::new();
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0")
+        .build()
+        .unwrap();
+
+    let mut set = HashSet::new();
+    let re = Regex::new(r"(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})").unwrap();
+    let mut fetches = FuturesUnordered::new();
+    for &url in FEEDS {
+        let c = client.clone();
+        fetches.push(async move {
+            if let Ok(resp) = c.get(url).send().await {
+                resp.text().await.ok()
+            } else {
+                None
+            }
+        });
+    }
+    while let Some(opt) = fetches.next().await {
+        if let Some(txt) = opt {
+            for cap in re.captures_iter(&txt) {
+                set.insert(format!("{}:{}", &cap[1], &cap[2]));
+            }
         }
-    };
+    }
 
     let mut futs = FuturesUnordered::new();
     for p in set {
@@ -487,7 +598,11 @@ async fn fetch_scored_proxies() -> Vec<String> {
                 success_rate: if ok { 1.0 } else { 0.0 },
                 throughput_kbps: 0.0,
                 error_rate: if ok { 0.0 } else { 1.0 },
-                rate_limit_score: if dur.as_millis() < 1000 && ok { 1.0 } else { 0.0 },
+                rate_limit_score: if dur.as_millis() < 1000 && ok {
+                    1.0
+                } else {
+                    0.0
+                },
                 uptime_pct: 1.0,
                 proxy_type: 1.0,
                 location_score: 0.5,
@@ -498,7 +613,7 @@ async fn fetch_scored_proxies() -> Vec<String> {
 
     let mut good = Vec::new();
     while let Some((proxy, score)) = futs.next().await {
-        if score >= 75.0 {
+        if score >= 40.0 {
             good.push(proxy);
         }
     }
@@ -961,6 +1076,10 @@ fn create_consumer(
                     }
                 } else {
                     let proxy = proxies.next();
+                    if proxy.is_empty() {
+                        net_err = true;
+                        break;
+                    }
                     for item in &matrix {
                         match item {
                             MatrixItem::Pop {
@@ -1228,6 +1347,10 @@ async fn run_validator(cfg: Arc<Config>) {
     let free = None;
     let proxies = if cfg.free {
         let list = fetch_scored_proxies().await;
+        if list.is_empty() {
+            eprintln!("No proxy passed the preliminary test – aborting");
+            std::process::exit(1);
+        }
         println!("Fetched {} proxies", list.len());
         ProxyPool::new(list)
     } else {

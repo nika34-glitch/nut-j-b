@@ -263,7 +263,7 @@ async fn run_cycle(
             location_score: 0.5,
         };
         let score = score_metrics(&metrics) / 100.0;
-        if score >= 0.75 {
+        if score >= 0.40 {
             good.push(proxy);
         }
     }
@@ -280,8 +280,12 @@ async fn run_cycle(
 
 async fn test_proxy(proxy: String) -> (String, bool, Duration) {
     let start = Instant::now();
-    let parts: Vec<_> = proxy.trim_start_matches("socks4a://").split(':').collect();
+    let (scheme, rest) = match proxy.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => ("socks4a", proxy.as_str()),
+    };
     let mut success = false;
+    let parts: Vec<_> = rest.split(':').collect();
     if parts.len() == 2 {
         let addr = format!("{}:{}", parts[0], parts[1]);
         let stream_res =
@@ -290,23 +294,42 @@ async fn test_proxy(proxy: String) -> (String, bool, Duration) {
             Ok(Ok(s)) => s,
             _ => return (proxy, false, start.elapsed()),
         };
-        // SOCKS4a handshake
-        let mut req = Vec::new();
-        req.push(0x04); // version
-        req.push(0x01); // CONNECT
-        let port: u16 = 110;
-        req.push((port >> 8) as u8);
-        req.push((port & 0xff) as u8);
-        req.extend(&[0, 0, 0, 1]);
-        req.push(0); // empty user id
-        req.extend(b"popmail.libero.it");
-        req.push(0);
-        if stream.write_all(&req).await.is_ok() {
-            let mut resp = [0u8; 8];
-            if stream.read_exact(&mut resp).await.is_ok() && resp[1] == 0x5a {
-                let mut buf = [0u8; 3];
-                if stream.read_exact(&mut buf).await.is_ok() {
-                    success = &buf == b"+OK";
+        match scheme {
+            "http" | "https" => {
+                let target = "popmail.libero.it:110";
+                let req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
+                if stream.write_all(req.as_bytes()).await.is_ok() {
+                    let mut buf = [0u8; 32];
+                    if stream.read_exact(&mut buf).await.is_ok()
+                        && buf.starts_with(b"HTTP/1.")
+                        && std::str::from_utf8(&buf).map_or(false, |s| s.contains("200"))
+                    {
+                        let mut greet = [0u8; 3];
+                        if stream.read_exact(&mut greet).await.is_ok() {
+                            success = &greet == b"+OK";
+                        }
+                    }
+                }
+            }
+            _ => {
+                let mut req = Vec::new();
+                req.push(0x04); // version
+                req.push(0x01); // CONNECT
+                let port: u16 = 110;
+                req.push((port >> 8) as u8);
+                req.push((port & 0xff) as u8);
+                req.extend(&[0, 0, 0, 1]);
+                req.push(0); // empty user id
+                req.extend(b"popmail.libero.it");
+                req.push(0);
+                if stream.write_all(&req).await.is_ok() {
+                    let mut resp = [0u8; 8];
+                    if stream.read_exact(&mut resp).await.is_ok() && resp[1] == 0x5a {
+                        let mut buf = [0u8; 3];
+                        if stream.read_exact(&mut buf).await.is_ok() {
+                            success = &buf == b"+OK";
+                        }
+                    }
                 }
             }
         }
