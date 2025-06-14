@@ -26,8 +26,21 @@ class CLIFrontend(tk.Tk):
         style.map("TButton", background=[("active", "#111111")])
 
         self.cmd_var = tk.StringVar(value="./libero_validator")
-        self.args_var = tk.StringVar()
-        self.stats_var = tk.StringVar(value="")
+        self.conc_var = tk.IntVar(value=3000)
+        self.timeout_var = tk.DoubleVar(value=10.0)
+        self.retries_var = tk.IntVar(value=0)
+        self.poponly_var = tk.BooleanVar()
+        self.full_var = tk.BooleanVar()
+        self.refresh_var = tk.DoubleVar(value=1.0)
+        self.free_var = tk.BooleanVar()
+        self.fast_open_var = tk.BooleanVar()
+        self.ui_var = tk.BooleanVar()
+        self.shards_var = tk.IntVar(value=1)
+        self.backend_var = tk.StringVar()
+        self.rps_var = tk.IntVar(value=15)
+        self.quarantine_var = tk.IntVar(value=60)
+        self.latency_weight_var = tk.DoubleVar(value=1.0)
+        self.ban_weight_var = tk.DoubleVar(value=1.5)
         self.process = None
         self.create_widgets()
 
@@ -38,10 +51,33 @@ class CLIFrontend(tk.Tk):
         ttk.Entry(frame, textvariable=self.cmd_var, width=40, style="TEntry").pack(side='left', fill='x', expand=True)
         ttk.Button(frame, text="Browse", command=self.browse_cmd, style="TButton").pack(side='left', padx=5)
 
-        args_frame = ttk.Frame(self, style="TFrame")
+        args_frame = ttk.LabelFrame(self, text="Options", style="TFrame")
         args_frame.pack(fill='x', padx=10)
-        ttk.Label(args_frame, text="Arguments:", style="TLabel").pack(side='left')
-        ttk.Entry(args_frame, textvariable=self.args_var, width=40, style="TEntry").pack(side='left', fill='x', expand=True)
+        ttk.Label(args_frame, text="Concurrency", style="TLabel").grid(row=0, column=0, sticky='w')
+        ttk.Spinbox(args_frame, from_=1, to=10000, textvariable=self.conc_var, width=7).grid(row=0, column=1, sticky='w')
+        ttk.Label(args_frame, text="Timeout", style="TLabel").grid(row=0, column=2, sticky='w')
+        ttk.Spinbox(args_frame, from_=1, to=60, textvariable=self.timeout_var, width=7).grid(row=0, column=3, sticky='w')
+        ttk.Label(args_frame, text="Retries", style="TLabel").grid(row=0, column=4, sticky='w')
+        ttk.Spinbox(args_frame, from_=0, to=10, textvariable=self.retries_var, width=5).grid(row=0, column=5, sticky='w')
+        ttk.Checkbutton(args_frame, text="POP only", variable=self.poponly_var).grid(row=1, column=0, sticky='w')
+        ttk.Checkbutton(args_frame, text="Full", variable=self.full_var).grid(row=1, column=1, sticky='w')
+        ttk.Checkbutton(args_frame, text="Free", variable=self.free_var).grid(row=1, column=2, sticky='w')
+        ttk.Checkbutton(args_frame, text="Fast Open", variable=self.fast_open_var).grid(row=1, column=3, sticky='w')
+        ttk.Checkbutton(args_frame, text="UI", variable=self.ui_var).grid(row=1, column=4, sticky='w')
+        ttk.Label(args_frame, text="Shards", style="TLabel").grid(row=2, column=0, sticky='w')
+        ttk.Spinbox(args_frame, from_=1, to=32, textvariable=self.shards_var, width=5).grid(row=2, column=1, sticky='w')
+        ttk.Label(args_frame, text="Refresh", style="TLabel").grid(row=2, column=2, sticky='w')
+        ttk.Spinbox(args_frame, from_=0, to=10, increment=0.1, textvariable=self.refresh_var, width=7).grid(row=2, column=3, sticky='w')
+        ttk.Label(args_frame, text="Backend", style="TLabel").grid(row=3, column=0, sticky='w')
+        ttk.Entry(args_frame, textvariable=self.backend_var, width=12, style="TEntry").grid(row=3, column=1, sticky='w')
+        ttk.Label(args_frame, text="RPS", style="TLabel").grid(row=3, column=2, sticky='w')
+        ttk.Spinbox(args_frame, from_=1, to=100, textvariable=self.rps_var, width=5).grid(row=3, column=3, sticky='w')
+        ttk.Label(args_frame, text="Quar", style="TLabel").grid(row=3, column=4, sticky='w')
+        ttk.Spinbox(args_frame, from_=0, to=3600, textvariable=self.quarantine_var, width=7).grid(row=3, column=5, sticky='w')
+        ttk.Label(args_frame, text="Latency W", style="TLabel").grid(row=4, column=0, sticky='w')
+        ttk.Scale(args_frame, from_=0.1, to=5.0, orient='horizontal', variable=self.latency_weight_var).grid(row=4, column=1, columnspan=2, sticky='ew')
+        ttk.Label(args_frame, text="Ban W", style="TLabel").grid(row=4, column=3, sticky='w')
+        ttk.Scale(args_frame, from_=0.1, to=5.0, orient='horizontal', variable=self.ban_weight_var).grid(row=4, column=4, columnspan=2, sticky='ew')
 
         btn_frame = ttk.Frame(self, style="TFrame")
         btn_frame.pack(fill='x', padx=10, pady=10)
@@ -54,7 +90,23 @@ class CLIFrontend(tk.Tk):
         self.output.configure(yscrollcommand=scrollbar.set)
         self.output.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
-        ttk.Label(self, textvariable=self.stats_var, style="TLabel").pack(fill='x', padx=10, pady=(0,10))
+
+        stats_frame = ttk.Frame(self, style="TFrame")
+        stats_frame.pack(fill='x', padx=10, pady=(0,10))
+        self.progress = ttk.Progressbar(stats_frame, length=200)
+        self.progress.grid(row=0, column=0, columnspan=8, sticky='ew', pady=2)
+        self.total_lbl = ttk.Label(stats_frame, text="Total 0")
+        self.total_lbl.grid(row=1, column=0, sticky='w')
+        self.checked_lbl = ttk.Label(stats_frame, text="Checked 0")
+        self.checked_lbl.grid(row=1, column=1, sticky='w')
+        self.valid_lbl = ttk.Label(stats_frame, text="Valid 0", foreground='lightgreen')
+        self.valid_lbl.grid(row=1, column=2, sticky='w')
+        self.invalid_lbl = ttk.Label(stats_frame, text="Invalid 0", foreground='red')
+        self.invalid_lbl.grid(row=1, column=3, sticky='w')
+        self.errors_lbl = ttk.Label(stats_frame, text="Errors 0")
+        self.errors_lbl.grid(row=1, column=4, sticky='w')
+        self.eta_lbl = ttk.Label(stats_frame, text="ETA ?")
+        self.eta_lbl.grid(row=1, column=5, sticky='w')
 
     def browse_cmd(self):
         path = filedialog.askopenfilename(title="Select executable")
@@ -65,7 +117,37 @@ class CLIFrontend(tk.Tk):
         if self.process:
             messagebox.showwarning("Running", "Process already running")
             return
-        cmd = [self.cmd_var.get()] + self.args_var.get().split()
+        cmd = [self.cmd_var.get()]
+        if self.conc_var.get():
+            cmd += ["--conc", str(self.conc_var.get())]
+        if self.timeout_var.get():
+            cmd += ["--timeout", str(self.timeout_var.get())]
+        if self.retries_var.get():
+            cmd += ["--retries", str(self.retries_var.get())]
+        if self.poponly_var.get():
+            cmd.append("--poponly")
+        if self.full_var.get():
+            cmd.append("--full")
+        if self.refresh_var.get():
+            cmd += ["--refresh", str(self.refresh_var.get())]
+        if self.free_var.get():
+            cmd.append("--free")
+        if self.backend_var.get():
+            cmd += ["--free-backend", self.backend_var.get()]
+        if self.rps_var.get() != 15:
+            cmd += ["--free-rps", str(self.rps_var.get())]
+        if self.quarantine_var.get() != 60:
+            cmd += ["--free-quarantine", str(self.quarantine_var.get())]
+        if self.latency_weight_var.get() != 1.0:
+            cmd += ["--free-latency-weight", str(self.latency_weight_var.get())]
+        if self.ban_weight_var.get() != 1.5:
+            cmd += ["--free-ban-weight", str(self.ban_weight_var.get())]
+        if self.fast_open_var.get():
+            cmd.append("--fast-open")
+        if self.ui_var.get():
+            cmd.append("--ui")
+        if self.shards_var.get() != 1:
+            cmd += ["--shards", str(self.shards_var.get())]
         self.output.config(state='normal')
         self.output.delete('1.0', tk.END)
         self.output.config(state='disabled')
@@ -103,38 +185,23 @@ class CLIFrontend(tk.Tk):
         if not line.startswith("tot:"):
             return
         parts = {}
-        bar = ""
         for item in line.strip().split():
-            if item.startswith("[") and item.endswith("]"):
-                bar = item
-                continue
             if ":" in item:
                 k, v = item.split(":", 1)
                 parts[k] = v
 
         try:
-            self.stats_var.set(
-                " ".join([
-                    f"Total {parts.get('tot','?')}",
-                    f"Checked {parts.get('chk','?')}",
-                    f"Valid {parts.get('ok','?')}",
-                    f"Invalid {parts.get('bad','?')}",
-                    f"Errors {parts.get('err','?')}",
-                    f"Retries {parts.get('ret','?')}",
-                    f"Remaining {parts.get('rem','?')}",
-                    f"CPS {parts.get('cps','?')}",
-                    f"CPM {parts.get('cpm','?')}",
-                    f"Valid% {parts.get('ok%','?')}",
-                    f"Invalid% {parts.get('bad%','?')}",
-                    f"Error% {parts.get('err%','?')}",
-                    f"Prog {parts.get('prog','?')}%",
-                    bar,
-                    f"ETA {parts.get('eta','?')}",
-                    f"Run {parts.get('run','?')}",
-                    f"Conc {parts.get('conc','?')}",
-                    f"Proxies {parts.get('prx','?')}",
-                ])
-            )
+            self.total_lbl.config(text=f"Total {parts.get('tot','?')}")
+            self.checked_lbl.config(text=f"Checked {parts.get('chk','?')}")
+            self.valid_lbl.config(text=f"Valid {parts.get('ok','?')}")
+            self.invalid_lbl.config(text=f"Invalid {parts.get('bad','?')}")
+            self.errors_lbl.config(text=f"Errors {parts.get('err','?')}")
+            self.eta_lbl.config(text=f"ETA {parts.get('eta','?')}")
+            if 'prog' in parts:
+                try:
+                    self.progress['value'] = float(parts.get('prog', 0))
+                except Exception:
+                    pass
         except Exception:
             pass
 
