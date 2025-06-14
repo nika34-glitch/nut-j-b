@@ -23,6 +23,7 @@ use clap::Parser;
 use libero_validator::estimate_bloom_size;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
+use regex::Regex;
 use parking_lot::Mutex;
 use rand::seq::SliceRandom;
 use rand::{rng, Rng};
@@ -342,36 +343,29 @@ fn extract_addr(proxy: &str) -> Option<String> {
 }
 
 fn parse_proxies(data: &str) -> Vec<String> {
+    static RE: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(
+            r"^(?:(?P<user>[^:@]+):(?P<pwd>[^:@]+)@)?(?P<host>\[[^\]]+\]|[^:]+):(?P<port>\d{1,5})$",
+        )
+        .unwrap()
+    });
+
     let mut formatted = Vec::with_capacity(data.lines().count());
     for ln in data.lines().map(str::trim) {
         if ln.is_empty() || ln.starts_with('#') {
             continue;
         }
 
-        let mut parts = ln.splitn(4, ':');
-        let first = parts.next().unwrap_or("");
-        let second_opt = parts.next();
-        let third = parts.next();
-        let fourth = parts.next();
-
-        let second = match second_opt {
-            Some(p) if !p.is_empty() && p.parse::<u16>().is_ok() => p,
-            _ => {
-                eprintln!("Skipping malformed proxy: {}", ln);
-                continue;
+        if let Some(cap) = RE.captures(ln) {
+            let host = cap.name("host").unwrap().as_str();
+            let port = cap.name("port").unwrap().as_str();
+            if let (Some(user), Some(pwd)) = (cap.name("user"), cap.name("pwd")) {
+                formatted.push(format!("http://{}:{}@{}:{}", user.as_str(), pwd.as_str(), host, port));
+            } else {
+                formatted.push(format!("socks4a://{}:{}", host, port));
             }
-        };
-
-        match (third, fourth) {
-            (Some(user), Some(pwd)) => {
-                formatted.push(format!("http://{}:{}@{}:{}", user, pwd, first, second));
-            }
-            (None, None) => {
-                formatted.push(format!("socks4a://{}:{}", first, second));
-            }
-            _ => {
-                eprintln!("Skipping malformed proxy: {}", ln);
-            }
+        } else {
+            eprintln!("Skipping malformed proxy: {}", ln);
         }
     }
     formatted
@@ -748,6 +742,15 @@ mod tests {
         assert_eq!(proxies.len(), 2);
         assert!(proxies.contains(&"socks4a://1.1.1.1:8080".to_string()));
         assert!(proxies.contains(&"http://user:pass@example.com:1234".to_string()));
+    }
+
+    #[test]
+    fn parse_proxies_ipv6() {
+        let data = "[2001:db8::1]:1080\n[2001:db8::2]:1081:user:pass";
+        let proxies = parse_proxies(data);
+        assert_eq!(proxies.len(), 2);
+        assert!(proxies.contains(&"socks4a://[2001:db8::1]:1080".to_string()));
+        assert!(proxies.contains(&"http://user:pass@[2001:db8::2]:1081".to_string()));
     }
 }
 
