@@ -282,7 +282,6 @@ impl Default for Health {
 /// Backend controller placeholder
 pub struct Controller;
 
-pub const MAX_RPS: u16 = 20;
 
 static LATENCY: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!("libero_free_latency_seconds", "latency", &["backend"]).unwrap()

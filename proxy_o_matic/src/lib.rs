@@ -2,11 +2,7 @@
 
 mod cli;
 mod db;
-mod probe;
-mod score;
 mod api;
-mod feed;
-mod scan;
 
 use clap::Parser;
 use tracing_subscriber::{fmt, EnvFilter};
