@@ -12,20 +12,45 @@ class CLIFrontend(tk.Tk):
         super().__init__()
         self.title("Analysis Tool GUI")
         self.geometry("600x400")
-        self.configure(bg="#333333")
+
+        # Colors inspired by the Libero Mail palette
+        self.PRIMARY_COLOR = "#0054a6"  # deep blue
+        self.ACCENT_COLOR = "#ff8200"   # orange accent
+        self.BG_COLOR = "#ffffff"
+        self.TEXT_COLOR = "#333333"
+
+        self.configure(bg=self.BG_COLOR)
+
+        # Use a clean sans serif font for a modern look
+        default_font = ("Helvetica", 10)
+        self.option_add("*Font", default_font)
 
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("TFrame", background="#333333")
-        style.configure("TLabel", background="#333333", foreground="#d0d0d0")
-        style.configure("TButton", background="#000000", foreground="#ffffff")
+        style.configure("TFrame", background=self.BG_COLOR)
         style.configure(
-            "TEntry", fieldbackground="#000000", foreground="#ffffff"
+            "TLabel", background=self.BG_COLOR, foreground=self.TEXT_COLOR
         )
-        style.map("TButton", background=[("active", "#111111")])
+        style.configure(
+            "TButton", background=self.PRIMARY_COLOR, foreground="#ffffff"
+        )
+        style.configure(
+            "TEntry", fieldbackground="#ffffff", foreground=self.TEXT_COLOR
+        )
+        style.map(
+            "TButton",
+            background=[("active", self.ACCENT_COLOR)],
+            foreground=[("active", "#ffffff")],
+        )
+
+        style.configure(
+            "Libero.Horizontal.TProgressbar",
+            troughcolor="#e0e0e0",
+            background=self.PRIMARY_COLOR,
+        )
 
         self.cmd_var = tk.StringVar(value="./libero_validator")
         self.conc_var = tk.IntVar(value=3000)
@@ -93,7 +118,14 @@ class CLIFrontend(tk.Tk):
         ttk.Button(btn_frame, text="Stop", command=self.stop_cmd, style="TButton").pack(side='left', padx=5)
         output_frame = ttk.Frame(self, style="TFrame")
         output_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        self.output = tk.Text(output_frame, state='disabled', wrap='word', bg='#000000', fg='#d0d0d0', insertbackground='#d0d0d0')
+        self.output = tk.Text(
+            output_frame,
+            state='disabled',
+            wrap='word',
+            bg='#ffffff',
+            fg=self.TEXT_COLOR,
+            insertbackground=self.TEXT_COLOR,
+        )
         scrollbar = ttk.Scrollbar(output_frame, command=self.output.yview)
         self.output.configure(yscrollcommand=scrollbar.set)
         self.output.pack(side='left', fill='both', expand=True)
@@ -101,7 +133,9 @@ class CLIFrontend(tk.Tk):
 
         stats_frame = ttk.Frame(self, style="TFrame")
         stats_frame.pack(fill='x', padx=10, pady=(0,10))
-        self.progress = ttk.Progressbar(stats_frame, length=200)
+        self.progress = ttk.Progressbar(
+            stats_frame, length=200, style="Libero.Horizontal.TProgressbar"
+        )
         self.progress.grid(row=0, column=0, columnspan=5, sticky='ew', pady=2)
         self.progress_lbl = ttk.Label(stats_frame, text="0%")
         self.progress_lbl.grid(row=0, column=5, sticky='w')
