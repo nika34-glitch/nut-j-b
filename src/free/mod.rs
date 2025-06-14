@@ -282,7 +282,7 @@ impl Default for Health {
 /// Backend controller placeholder
 pub struct Controller;
 
-pub const MAX_RPS: u16 = 15;
+pub const MAX_RPS: u16 = 20;
 
 static LATENCY: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!("libero_free_latency_seconds", "latency", &["backend"]).unwrap()
@@ -395,7 +395,7 @@ impl TokenBucket {
     fn refill(&mut self, max_rps: u16, now: Instant) {
         let elapsed = now.duration_since(self.last).as_secs_f32();
         if elapsed > 0.0 {
-            self.tokens = (self.tokens + elapsed * max_rps as f32).min(max_rps as f32);
+            self.tokens = (self.tokens + elapsed * max_rps as f32).min(max_rps as f32 * 2.0);
             self.last = now;
         }
     }
