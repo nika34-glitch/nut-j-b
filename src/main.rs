@@ -388,6 +388,49 @@ async fn watch_proxies(path: String, pool: ProxyPool) {
     }
 }
 
+async fn fetch_free_proxies() -> Vec<String> {
+    use proxy_feed::{harvester::fetch_all, Config, Sources};
+    let cfg = Config {
+        sources: Sources {
+            free_proxy_list: Some("https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt".to_string()),
+            ssl_proxies: Some("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt".to_string()),
+            proxy_scrape: None,
+            github_lists: None,
+            proxybroker_cmd: None,
+        },
+    };
+    match fetch_all(&cfg).await {
+        Ok(set) => set.into_iter().collect(),
+        Err(e) => {
+            eprintln!("failed to fetch proxies: {e}");
+            Vec::new()
+        }
+    }
+}
+
+async fn filter_live(proxies: Vec<String>) -> Vec<String> {
+    use futures::stream::{self, StreamExt};
+    stream::iter(proxies)
+        .map(|p| async move {
+            let addr = p
+                .split("://")
+                .last()
+                .unwrap_or(&p)
+                .split('@')
+                .last()
+                .unwrap_or(&p)
+                .to_string();
+            match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&addr)).await {
+                Ok(Ok(_)) => Some(p),
+                _ => None,
+            }
+        })
+        .buffer_unordered(100)
+        .filter_map(|x| async move { x })
+        .collect()
+        .await
+}
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[cfg(feature = "free")]
@@ -940,6 +983,7 @@ struct Config {
     ban_weight: f32,
     fast_open: bool,
     ui: bool,
+    auto_proxy: bool,
     _nic_queue_pin: bool,
 }
 
@@ -1022,6 +1066,9 @@ struct Cli {
     /// Use free backends
     #[arg(long)]
     free: bool,
+    /// Automatically fetch free proxies
+    #[arg(long = "auto-proxy")]
+    auto_proxy: bool,
     /// Force a specific free backend
     #[arg(long = "free-backend")]
     backend: Option<String>,
@@ -1077,6 +1124,7 @@ fn merge_cfg(cli: Cli) -> Config {
         ban_weight: cli.ban_weight,
         fast_open: cli.fast_open,
         ui: cli.ui,
+        auto_proxy: cli.auto_proxy,
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc {
@@ -1146,7 +1194,12 @@ async fn run_validator(cfg: Arc<Config>) {
     } else {
         None
     };
-    let proxies = if cfg.free {
+    let proxies = if cfg.auto_proxy {
+        let fetched = fetch_free_proxies().await;
+        let live = filter_live(fetched).await;
+        println!("Fetched {} live proxies", live.len());
+        ProxyPool::new(live)
+    } else if cfg.free {
         ProxyPool::new(vec!["127.0.0.1:0".to_string()])
     } else {
         let p = load_proxies(&cfg.proxy_file);
