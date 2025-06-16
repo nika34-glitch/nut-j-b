@@ -1,35 +1,5 @@
 # Libero Email Validator
 
-## Proxy Feed Fetcher
-
-This repository also includes a separate crate `proxy_feed` for aggregating raw proxy lists.
-Use the `fetch` subcommand to download public proxy sources specified in a TOML configuration file and append them to an output list.
-
-```bash
-cargo run -p proxy_feed -- fetch --config proxy_feed/example-config.toml --output feeds/all_proxies.txt
-```
-
-The example configuration lists several URLs that return HTTP proxy lists.
-Any of the sections can be omitted or replaced with your own sources. The optional `proxybroker_cmd` field allows running a custom command that outputs additional proxies.
-
-### OtoProxy helper
-
-For additional proxy sources the repository ships a small Python script
-`otoproxy/otoproxy.py`. It scrapes URLs listed in `otoproxy/sites.txt`, tests the
-proxies and stores the working ones in the `feeds/` directory. Run it manually
-with:
-
-```bash
-python otoproxy/otoproxy.py
-```
-
-### GUI Front-end
-
-A simple Tkinter interface is available in `gui_frontend.py` for running the validator or any command-line analysis. Launch it with:
-```bash
-python gui_frontend.py
-```
-The interface parses the validator output and shows all runtime statistics such as checks per second, remaining count, success rates, and more.
 
 #Tool Description: Libero Email Credential Validator (LECV)
 #The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.

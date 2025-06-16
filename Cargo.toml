@@ -8,12 +8,6 @@ path = "src/main.rs"
 test = false
 doctest = false
 
-[[bin]]
-name = "proxy_sidecar"
-path = "src/bin/proxy_sidecar.rs"
-test = false
-doctest = false
-
 
 [package]
 name = "libero_validator"
@@ -26,14 +20,6 @@ io_uring = ["dep:_tokio-uring"]
 ebpf = ["dep:redbpf"]
 afxdp = ["dep:afxdp"]
 default = []
-free = [
-    "dashmap",
-    "prometheus",
-    "tokio-rustls",
-    "trust-dns-resolver",
-    "tokio-tungstenite",
-    "webpki-roots",
-]
 fast-open = []
 
 [dependencies]
@@ -68,24 +54,8 @@ parking_lot = "0.12"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Free mode helpers
-async-trait = "0.1"
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
-dashmap = { version = "5", optional = true }
-prometheus = { version = "0.13", optional = true }
-tokio-rustls = { version = "0.24", optional = true }
-trust-dns-resolver = { version = "0.23", default-features = false, features = ["tokio-runtime", "dns-over-https-rustls"], optional = true }
-tokio-tungstenite = { version = "0.26", optional = true, features = ["rustls-tls-webpki-roots"] }
-webpki-roots = { version = "0.26", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-anyhow = "1"
-# Terminal UI
-ratatui = "0.26"
-crossterm = "0.27"
-# Memory mapped input
 memmap2 = "0.5"
-proxy_feed = { path = "./proxy_feed" }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 jemallocator = "0.5"
@@ -97,13 +67,10 @@ opt-level = 3
 panic = "abort"
 
 [dev-dependencies]
-wiremock = "0.5"
 tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "test-util"] }
 
 [workspace]
 members = [
     ".",
-    "proxy_o_matic",
-    "proxy_feed",
 ]
 

