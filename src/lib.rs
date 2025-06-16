@@ -1,5 +1,3 @@
-#[cfg(feature = "free")]
-pub mod free;
 
 use std::fs::File;
 
