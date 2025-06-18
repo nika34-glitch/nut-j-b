@@ -919,7 +919,7 @@ struct Cli {
     #[arg(long)]
     fast_open: bool,
     /// Proxy attempts per minute
-    #[arg(long = "ppm")] 
+    #[arg(long = "ppm")]
     ppm: Option<u32>,
     /// Shards (fork processes)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
@@ -951,7 +951,7 @@ fn merge_cfg(cli: Cli) -> Config {
         refresh: 0.016,
         shards: cli.shards,
         fast_open: cli.fast_open,
-        ppm: cli.ppm.unwrap_or(5),
+        ppm: cli.ppm.unwrap_or(6),
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc {
