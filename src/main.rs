@@ -376,15 +376,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 struct POP3Handler {
     host: String,
     port: u16,
+    _ssl_flag: bool,
     timeout: Duration,
+    _proxy_uri: String,
 }
 
 impl POP3Handler {
-    fn new(host: String, port: u16, timeout: f64) -> Self {
+    fn new(host: String, port: u16, _ssl_flag: bool, timeout: f64, _proxy_uri: String) -> Self {
         Self {
             host,
             port,
+            _ssl_flag,
             timeout: Duration::from_secs_f64(timeout),
+            _proxy_uri,
         }
     }
 
@@ -459,15 +463,17 @@ struct IMAPHandler {
     port: u16,
     starttls: bool,
     timeout: Duration,
+    _proxy_uri: String,
 }
 
 impl IMAPHandler {
-    fn new(host: String, port: u16, starttls: bool, timeout: f64) -> Self {
+    fn new(host: String, port: u16, starttls: bool, timeout: f64, _proxy_uri: String) -> Self {
         Self {
             host,
             port,
             starttls,
             timeout: Duration::from_secs_f64(timeout),
+            _proxy_uri,
         }
     }
 
@@ -660,11 +666,15 @@ fn create_consumer(
                     }
                     for item in &matrix {
                         match item {
-                            MatrixItem::Pop { host, port, .. } => {
+                            MatrixItem::Pop {
+                                host, port, ssl, ..
+                            } => {
                                 let h = POP3Handler::new(
                                     host.clone(),
                                     *port,
+                                    *ssl,
                                     cfg.timeout,
+                                    proxy.clone(),
                                 );
                                 if h.login(&email, &pwd, cfg.fast_open).await {
                                     ok = true;
@@ -673,12 +683,18 @@ fn create_consumer(
                                 }
                                 net_err = false;
                             }
-                            MatrixItem::Imap { host, port, starttls, .. } => {
+                            MatrixItem::Imap {
+                                host,
+                                port,
+                                starttls,
+                                ..
+                            } => {
                                 let h = IMAPHandler::new(
                                     host.clone(),
                                     *port,
                                     *starttls,
                                     cfg.timeout,
+                                    proxy.clone(),
                                 );
                                 if h.login(&email, &pwd).await {
                                     ok = true;
@@ -727,6 +743,7 @@ enum MatrixItem {
     Pop {
         host: String,
         port: u16,
+        ssl: bool,
     },
     Imap {
         host: String,
@@ -766,6 +783,7 @@ impl Config {
             v.push(MatrixItem::Pop {
                 host: pop.to_string(),
                 port: self.pop3_ssl_port,
+                ssl: true,
             });
             return v;
         }
@@ -774,10 +792,12 @@ impl Config {
                 MatrixItem::Pop {
                     host: pop.to_string(),
                     port: self.pop3_ssl_port,
+                    ssl: true,
                 },
                 MatrixItem::Pop {
                     host: pop.to_string(),
                     port: self.pop3_plain_port,
+                    ssl: false,
                 },
                 MatrixItem::Imap {
                     host: imap.to_string(),
@@ -796,6 +816,7 @@ impl Config {
             MatrixItem::Pop {
                 host: pop.to_string(),
                 port: self.pop3_ssl_port,
+                ssl: true,
             },
             MatrixItem::Imap {
                 host: imap.to_string(),
