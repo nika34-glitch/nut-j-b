@@ -1,0 +1,5 @@
+requests
+pystyle
+datetime
+psutil
+rich
