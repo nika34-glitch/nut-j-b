@@ -365,13 +365,27 @@ async fn latency_ok(proxy: &str) -> bool {
 fn spawn_scraper(tx: mpsc::UnboundedSender<String>) -> JoinHandle<()> {
     tokio::spawn(async move {
         pyo3::prepare_freethreaded_python();
-        let fut = Python::with_gil(|py| -> PyResult<_> {
+        let (event_loop, fut) = Python::with_gil(|py| -> PyResult<(Py<PyAny>, _)> {
             let sender = Py::new(py, PySender { tx })?;
             let module = py.import("proxy_gatherer.bridge")?;
             let coro = module.getattr("run")?.call1((sender,))?;
-            pyo3_tokio::into_future(coro)
+
+            let asyncio = py.import("asyncio")?;
+            let event_loop = asyncio.call_method0("new_event_loop")?;
+            asyncio.call_method1("set_event_loop", (event_loop,))?;
+            let locals = pyo3_asyncio::TaskLocals::new(event_loop);
+            let fut = pyo3_asyncio::into_future_with_locals(&locals, coro)?;
+            Ok((event_loop.into(), fut))
         })
         .expect("py init");
+
+        let event_loop_handle = event_loop.clone();
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let _ = event_loop_handle.as_ref(py).call_method0("run_forever");
+            });
+        });
+
         if let Err(e) = fut.await {
             eprintln!("python task error: {e:?}");
         }
