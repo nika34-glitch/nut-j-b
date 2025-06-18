@@ -20,22 +20,21 @@
 
 use bloomfilter::Bloom;
 use clap::Parser;
+use dashmap::DashMap;
+use env_logger;
 use libero_validator::estimate_bloom_size;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use dashmap::DashMap;
 use pyo3::prelude::*;
 use pyo3_asyncio::tokio as pyo3_tokio;
-use tokio_socks::tcp::{Socks4Stream, Socks5Stream};
-use url::Url;
 use rand::{rng, Rng};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -43,7 +42,8 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
-use env_logger;
+use tokio_socks::tcp::{Socks4Stream, Socks5Stream};
+use url::Url;
 
 // ---------------------------------------------------------------------------
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
@@ -271,17 +271,11 @@ impl ProxyPool {
     }
 
     fn count_hot(&self) -> usize {
-        self.map
-            .iter()
-            .filter(|m| !m.value().is_cold)
-            .count()
+        self.map.iter().filter(|m| !m.value().is_cold).count()
     }
 
     fn count_cold(&self) -> usize {
-        self.map
-            .iter()
-            .filter(|m| m.value().is_cold)
-            .count()
+        self.map.iter().filter(|m| m.value().is_cold).count()
     }
 
     async fn acquire(&self, ppm: u32) -> Option<String> {
@@ -337,7 +331,9 @@ fn parse_proxy_line(line: &str) -> Option<(String, bool)> {
     if line.is_empty() || line.starts_with('#') {
         return None;
     }
-    let url = Url::parse(line).or_else(|_| Url::parse(&format!("socks4://{}", line))).ok()?;
+    let url = Url::parse(line)
+        .or_else(|_| Url::parse(&format!("socks4://{}", line)))
+        .ok()?;
     match url.scheme() {
         "socks4" | "socks4a" | "socks5" | "socks5h" => Some((url.to_string(), false)),
         "http" | "https" => Some((url.to_string(), true)),
@@ -346,8 +342,7 @@ fn parse_proxy_line(line: &str) -> Option<(String, bool)> {
 }
 
 fn parse_proxies(data: &str) -> Vec<String> {
-    data
-        .lines()
+    data.lines()
         .filter_map(|l| parse_proxy_line(l).map(|(p, _)| p))
         .collect()
 }
@@ -399,8 +394,6 @@ impl PySender {
     }
 }
 
-
-
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 enum MailProto {
@@ -421,13 +414,25 @@ impl MailProto {
     }
 }
 
-async fn dial(target_host: &str, proto: MailProto, proxy: &str, timeout: Duration) -> std::io::Result<TcpStream> {
-    let url = Url::parse(proxy).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad proxy"))?;
-    let addr = format!("{}:{}", url.host_str().ok_or(std::io::ErrorKind::InvalidInput)?, url.port_or_known_default().ok_or(std::io::ErrorKind::InvalidInput)?);
+async fn dial(
+    target_host: &str,
+    proto: MailProto,
+    proxy: &str,
+    timeout: Duration,
+) -> std::io::Result<TcpStream> {
+    let url = Url::parse(proxy)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad proxy"))?;
+    let addr = format!(
+        "{}:{}",
+        url.host_str().ok_or(std::io::ErrorKind::InvalidInput)?,
+        url.port_or_known_default()
+            .ok_or(std::io::ErrorKind::InvalidInput)?
+    );
     let target = (target_host, proto.port());
     match url.scheme() {
         "socks4" | "socks4a" => {
-            match tokio::time::timeout(timeout, Socks4Stream::connect(addr.as_str(), target)).await {
+            match tokio::time::timeout(timeout, Socks4Stream::connect(addr.as_str(), target)).await
+            {
                 Ok(Ok(s)) => Ok(s.into_inner()),
                 Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
                 Err(e) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, e)),
@@ -437,20 +442,30 @@ async fn dial(target_host: &str, proto: MailProto, proxy: &str, timeout: Duratio
             if !url.username().is_empty() || url.password().is_some() {
                 let user = url.username();
                 let pass = url.password().unwrap_or("");
-                match tokio::time::timeout(timeout, Socks5Stream::connect_with_password(addr.as_str(), target, user, pass)).await {
+                match tokio::time::timeout(
+                    timeout,
+                    Socks5Stream::connect_with_password(addr.as_str(), target, user, pass),
+                )
+                .await
+                {
                     Ok(Ok(s)) => Ok(s.into_inner()),
                     Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
                     Err(e) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, e)),
                 }
             } else {
-                match tokio::time::timeout(timeout, Socks5Stream::connect(addr.as_str(), target)).await {
+                match tokio::time::timeout(timeout, Socks5Stream::connect(addr.as_str(), target))
+                    .await
+                {
                     Ok(Ok(s)) => Ok(s.into_inner()),
                     Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
                     Err(e) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, e)),
                 }
             }
         }
-        _ => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "scheme")),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "scheme",
+        )),
     }
 }
 
@@ -481,7 +496,11 @@ impl POP3Handler {
 
         let mut stream = match dial(
             &self.host,
-            if self._ssl_flag { MailProto::PopSsl } else { MailProto::Pop },
+            if self._ssl_flag {
+                MailProto::PopSsl
+            } else {
+                MailProto::Pop
+            },
             &self._proxy_uri,
             self.timeout,
         )
@@ -669,7 +688,6 @@ fn make_table(stats: &Stats, start: Instant, cfg: &Config, proxies: &ProxyPool) 
         proxies.size()
     );
 }
-
 
 #[repr(align(64))]
 struct Stats {
@@ -919,7 +937,7 @@ struct Cli {
     #[arg(long)]
     fast_open: bool,
     /// Proxy attempts per minute
-    #[arg(long = "ppm")] 
+    #[arg(long = "ppm")]
     ppm: Option<u32>,
     /// Shards (fork processes)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
@@ -983,8 +1001,21 @@ fn merge_cfg(cli: Cli) -> Config {
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 async fn run_validator(cfg: Arc<Config>) {
-    let initial = load_proxies(&cfg.proxy_file);
+    let raw = load_proxies(&cfg.proxy_file);
+    let mut initial = Vec::new();
+    for (p, cold) in raw {
+        if latency_ok(&p).await {
+            initial.push((p, cold));
+        }
+    }
     let proxies = ProxyPool::new(initial);
+    let addrs: Vec<String> = proxies
+        .map
+        .iter()
+        .filter(|m| !m.value().is_cold)
+        .filter_map(|m| extract_addr(m.key()))
+        .collect();
+    prewarm_syn_pool(&addrs);
     println!("Loaded {} proxies", proxies.size());
     let (p_tx, mut p_rx) = mpsc::unbounded_channel();
     spawn_scraper(p_tx);
@@ -1006,7 +1037,8 @@ async fn run_validator(cfg: Arc<Config>) {
         let mut int = interval(Duration::from_secs(30));
         loop {
             int.tick().await;
-            let attempts_per_min = stats_clone.checked.load(Ordering::Relaxed) as f64 / (start_time.elapsed().as_secs_f64() / 60.0).max(1.0);
+            let attempts_per_min = stats_clone.checked.load(Ordering::Relaxed) as f64
+                / (start_time.elapsed().as_secs_f64() / 60.0).max(1.0);
             log::info!(
                 "hot:{} cold:{} attempts/min:{:.0} successes:{} errors:{}",
                 proxies_clone.count_hot(),
