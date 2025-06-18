@@ -969,7 +969,7 @@ fn merge_cfg(cli: Cli) -> Config {
         refresh: 0.016,
         shards: cli.shards,
         fast_open: cli.fast_open,
-        ppm: cli.ppm.unwrap_or(5),
+        ppm: cli.ppm.unwrap_or(6),
         _nic_queue_pin: false,
     };
     if let Some(c) = cli.conc {
