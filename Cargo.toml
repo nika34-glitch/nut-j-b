@@ -47,9 +47,13 @@ phf = { version = "0.11", features = ["macros"] }
 rand = "0.9"
 # Bloom filter for duplicate detection
 bloomfilter = "3"
+# Fast CRC32 hashing
+crc32fast = "1.4"
 # Faster mutexes
 parking_lot = "0.12"
 regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 memmap2 = "0.5"
 
@@ -62,7 +66,8 @@ lto = "fat"
 opt-level = 3
 panic = "abort"
 
-
+[dev-dependencies]
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "test-util"] }
 
 [workspace]
 members = [
