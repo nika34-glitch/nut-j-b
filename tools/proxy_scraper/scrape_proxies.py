@@ -79,17 +79,10 @@ try:
 except Exception:
     cy_score_single_proxy = None
 
-try:
-    from proxyhub import SOURCE_LIST, fetch_source
-except ImportError:
-    SOURCE_LIST = []
+SOURCE_LIST: list[str] = []
 
-    async def fetch_source(url: str) -> list[str]:
-        return []
-
-    logging.warning(
-        "proxyhub module not found or incomplete, disabling ProxyHub scraping"
-    )
+async def fetch_source(url: str) -> list[str]:
+    return []
 
 try:
     import aiohttp  # type: ignore
@@ -127,10 +120,7 @@ PROXXY_SOURCES_FILE = os.path.join(
     os.path.dirname(__file__), "vendor", "proXXy", "proxy_sources.json"
 )
 
-# ProxyHub async scraping configuration
-PROXYHUB_INTERVAL = 300.0  # seconds between ProxyHub runs
-PROXYHUB_CONCURRENCY = int(os.getenv("PROXYHUB_CONCURRENCY", "20"))
-PROXYHUB_BATCH_SIZE = int(os.getenv("PROXYHUB_BATCH_SIZE", "100"))
+# Interval for Bloody-Proxy-Scraper
 BLOODY_INTERVAL = 300  # seconds between Bloody-Proxy-Scraper runs
 MAX_PROXY_SET_SIZE = int(os.getenv("MAX_PROXY_SET_SIZE", "100000"))
 
@@ -2959,32 +2949,6 @@ async def scrape_openproxylist(interval: float, concurrency: int):
         await asyncio.sleep(interval)
 
 
-async def scrape_proxyhub(
-    interval: float, concurrency: int, batch_size: int = PROXYHUB_BATCH_SIZE
-) -> None:
-    """Run ProxyHub's asynchronous fetcher alongside other scrapers."""
-
-    async def _fetch(url: str, sem: asyncio.Semaphore) -> List[str]:
-        async with sem:
-            try:
-                return await fetch_source(url)
-            except Exception as e:
-                logging.error("proxyhub source error %s: %s", url, e)
-                return []
-
-    while True:
-        sem = asyncio.Semaphore(concurrency)
-        urls = list(SOURCE_LIST)
-        for i in range(0, len(urls), batch_size):
-            batch = urls[i : i + batch_size]
-            tasks = [asyncio.create_task(_fetch(url, sem)) for url in batch]
-            for task in asyncio.as_completed(tasks):
-                proxies = await task
-                if not proxies:
-                    continue
-                STATS["api_counts"]["proxyhub"] += len(proxies)
-                add_proxies_sync(proxies, source="proxyhub")
-        await asyncio.sleep(interval)
 
 
 TR_RE = re.compile(
@@ -3106,7 +3070,6 @@ async def main() -> None:
         tg.create_task(writer_loop())
         tg.create_task(stats_loop())
         tg.create_task(run_proxxy())
-        tg.create_task(scrape_proxyhub(PROXYHUB_INTERVAL, PROXYHUB_CONCURRENCY))
         tg.create_task(scrape_gatherproxy(GATHER_PROXY_INTERVAL, GATHER_PROXY_CONCURRENCY))
         tg.create_task(scrape_openproxylist(OPENPROXYLIST_INTERVAL, OPENPROXYLIST_CONCURRENCY))
         tg.create_task(scrape_proxyscraper_sources())
