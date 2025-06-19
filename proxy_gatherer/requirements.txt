@@ -1,6 +1,0 @@
-requests
-aiofiles
-aiohttp
-beautifulsoup4
-lxml
-
