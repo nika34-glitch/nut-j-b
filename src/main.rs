@@ -26,9 +26,7 @@ use libero_validator::estimate_bloom_size;
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use pyo3::prelude::*;
-use pyo3_asyncio::tokio as pyo3_tokio;
-use rand::{rng, Rng};
+use rand::Rng;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -359,52 +357,6 @@ async fn latency_ok(proxy: &str) -> bool {
             .is_ok()
     } else {
         false
-    }
-}
-
-fn spawn_scraper(tx: mpsc::UnboundedSender<String>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        pyo3::prepare_freethreaded_python();
-        let (event_loop, fut) = Python::with_gil(|py| -> PyResult<(Py<PyAny>, _)> {
-            let sender = Py::new(py, PySender { tx })?;
-            let module = py.import("proxy_gatherer.bridge")?;
-            let coro = module.getattr("run")?.call1((sender,))?;
-
-            let asyncio = py.import("asyncio")?;
-            let event_loop = asyncio.call_method0("new_event_loop")?;
-            asyncio.call_method1("set_event_loop", (event_loop,))?;
-            let locals = pyo3_asyncio::TaskLocals::new(event_loop);
-            let fut = pyo3_asyncio::into_future_with_locals(&locals, coro)?;
-            Ok((event_loop.into(), fut))
-        })
-        .expect("py init");
-
-        let event_loop_handle = event_loop.clone();
-        tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
-                let _ = event_loop_handle.as_ref(py).call_method0("run_forever");
-            });
-        });
-
-        if let Err(e) = fut.await {
-            eprintln!("python task error: {e:?}");
-        }
-    })
-}
-
-#[pyclass]
-struct PySender {
-    tx: mpsc::UnboundedSender<String>,
-}
-
-#[pymethods]
-impl PySender {
-    fn send<'p>(&self, py: Python<'p>, proxy: String) -> PyResult<&'p PyAny> {
-        let tx = self.tx.clone();
-        pyo3_tokio::future_into_py(py, async move {
-            let _ = tx.send(proxy);
-            Ok(())
-        })
     }
 }
 
@@ -858,7 +810,6 @@ struct Config {
     concurrency: usize,
     input_file: String,
     proxy_file: String,
-    watch_interval: u64,
     poponly: bool,
     full: bool,
     refresh: f64,
@@ -944,9 +895,6 @@ struct Cli {
     /// Dashboard refresh rate seconds (min 0.016)
     #[arg(long)]
     refresh: Option<f64>,
-    /// Proxy reload interval seconds
-    #[arg(long = "proxy-watch", default_value_t = 30)]
-    proxy_watch: u64,
     /// Enable TCP Fast Open
     #[arg(long)]
     fast_open: bool,
@@ -977,7 +925,6 @@ fn merge_cfg(cli: Cli) -> Config {
         concurrency: 3_000,
         input_file: "combos.txt".to_string(),
         proxy_file: "proxies.txt".to_string(),
-        watch_interval: cli.proxy_watch,
         poponly: false,
         full: false,
         refresh: 0.016,
@@ -1031,18 +978,6 @@ async fn run_validator(cfg: Arc<Config>) {
         .collect();
     prewarm_syn_pool(&addrs);
     println!("Loaded {} proxies", proxies.size());
-    let (p_tx, mut p_rx) = mpsc::unbounded_channel();
-    spawn_scraper(p_tx);
-    let pool_clone = proxies.clone();
-    tokio::spawn(async move {
-        while let Some(line) = p_rx.recv().await {
-            if let Some((url, cold)) = parse_proxy_line(&line) {
-                if latency_ok(&url).await {
-                    pool_clone.insert(url, cold);
-                }
-            }
-        }
-    });
     let stats = Arc::new(Stats::new());
     let stats_clone = stats.clone();
     let proxies_clone = proxies.clone();
